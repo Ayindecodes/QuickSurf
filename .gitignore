@@ -1,0 +1,16 @@
+# Ignore env and secrets
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# DB
+db.sqlite3
+
+# Static & media files
+/staticfiles
+/media
+
+# Virtual environment
+venv/

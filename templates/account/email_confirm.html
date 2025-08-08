@@ -1,0 +1,16 @@
+{% load i18n %}
+<!DOCTYPE html>
+<html>
+  <head><title>{% trans "Confirm Email Address" %}</title></head>
+  <body>
+    <h1>{% trans "Confirm Email Address" %}</h1>
+    <p>{% blocktrans with email_address=email_address %}
+      Please confirm that {{ email_address }} is your email address.
+    {% endblocktrans %}</p>
+
+    <form method="post">
+      {% csrf_token %}
+      <button type="submit">{% trans "Confirm" %}</button>
+    </form>
+  </body>
+</html>
