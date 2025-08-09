@@ -14,3 +14,19 @@ class DataTransactionSerializer(serializers.ModelSerializer):
         model = DataTransaction
         fields = ['id', 'user', 'network', 'phone', 'plan', 'amount', 'status', 'timestamp']
         read_only_fields = ['user', 'status', 'timestamp']
+
+        from rest_framework import serializers
+
+class AirtimePurchaseRequestSchema(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    network = serializers.CharField()
+    phone = serializers.CharField()
+    client_reference = serializers.CharField()
+
+class DataPurchaseRequestSchema(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    network = serializers.CharField()
+    phone = serializers.CharField()
+    plan = serializers.CharField()
+    client_reference = serializers.CharField()
+
