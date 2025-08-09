@@ -1,13 +1,14 @@
 from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
+import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # --- Core settings ---
 SECRET_KEY = config("SECRET_KEY")
 DEBUG = config("DEBUG", default=True, cast=bool)
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*", cast=Csv())
 
 # --- Installed apps ---
 INSTALLED_APPS = [
@@ -29,7 +30,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'drf_spectacular',
     'corsheaders',
-    'django_filters',  # ✅ for API filtering
+    'django_filters',
 
     # Project apps
     'users.apps.UsersConfig',
@@ -46,7 +47,6 @@ SITE_ID = 1
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
 
-    # CORS first
     'corsheaders.middleware.CorsMiddleware',
 
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -80,11 +80,12 @@ TEMPLATES = [
 WSGI_APPLICATION = 'quicksurf.wsgi.application'
 
 # --- Database ---
+# Reads from DATABASE_URL if provided (Render/Heroku style), else falls back to SQLite
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / config("DB_NAME", default="db.sqlite3"),
-    }
+    'default': dj_database_url.config(
+        default=f"sqlite:///{BASE_DIR / config('DB_NAME', default='db.sqlite3')}",
+        conn_max_age=600
+    )
 }
 
 # --- Password validators ---
@@ -144,8 +145,6 @@ REST_FRAMEWORK = {
         'anon': '100/day',
     },
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
-
-    # ✅ Pagination & filtering ready
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 25,
     'DEFAULT_FILTER_BACKENDS': [

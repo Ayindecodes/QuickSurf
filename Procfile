@@ -1,1 +1,1 @@
-web: gunicorn QuicksurfBackend.wsgi
+web: gunicorn QuicksurfBackend.wsgi --log-file -
