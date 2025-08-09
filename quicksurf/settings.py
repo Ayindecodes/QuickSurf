@@ -46,6 +46,8 @@ SITE_ID = 1
 # --- Middleware ---
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
+
 
     'corsheaders.middleware.CorsMiddleware',
 
@@ -81,12 +83,16 @@ WSGI_APPLICATION = 'quicksurf.wsgi.application'
 
 # --- Database ---
 # Reads from DATABASE_URL if provided (Render/Heroku style), else falls back to SQLite
+import dj_database_url
+
 DATABASES = {
     'default': dj_database_url.config(
-        default=f"sqlite:///{BASE_DIR / config('DB_NAME', default='db.sqlite3')}",
-        conn_max_age=600
+        default=config("DATABASE_URL"),
+        conn_max_age=600,  # keeps connections alive
+        ssl_require=True   # Render Postgres uses SSL
     )
 }
+
 
 # --- Password validators ---
 AUTH_PASSWORD_VALIDATORS = [
