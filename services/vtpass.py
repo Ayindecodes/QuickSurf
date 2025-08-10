@@ -3,23 +3,29 @@ import base64
 import uuid
 from decouple import config
 
-# ✅ Load secrets from .env
-VTPASS_EMAIL      = config("VTPASS_EMAIL")
-VTPASS_API_KEY    = config("VTPASS_API_KEY")
+# --- Load secrets from .env ---
+PROVIDER_MODE = config("PROVIDER_MODE", default="MOCK").upper()
+VTPASS_EMAIL = config("VTPASS_EMAIL")
+VTPASS_API_KEY = config("VTPASS_API_KEY")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY")
-VTPASS_SECRET_KEY = config("VTPASS_SECRET_KEY")
-VTPASS_BASE_URL   = config("VTPASS_BASE_URL", default="https://sandbox.vtpass.com/api")
 
-# ✅ Prepare Basic Auth Header (email + API key)
+# --- Auto-switch base URL ---
+VTPASS_BASE_URL = (
+    "https://vtpass.com/api" if PROVIDER_MODE == "LIVE" else "https://sandbox.vtpass.com/api"
+)
+
+# --- Basic Auth Header ---
 auth_string = f"{VTPASS_EMAIL}:{VTPASS_API_KEY}"
 AUTH_HEADER = base64.b64encode(auth_string.encode()).decode()
 
 
 def generate_request_id(prefix="REQ"):
+    """Generate a unique request ID for idempotency."""
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
 def vtpass_headers():
+    """Return default VTpass request headers."""
     return {
         "Authorization": f"Basic {AUTH_HEADER}",
         "Content-Type": "application/json",
@@ -27,7 +33,7 @@ def vtpass_headers():
     }
 
 
-# ✅ Service ID maps — match VTpass naming
+# --- Service ID maps ---
 AIRTIME_SERVICE_IDS = {
     "mtn": "mtn",
     "glo": "glo",
@@ -43,7 +49,7 @@ DATA_SERVICE_IDS = {
 }
 
 
-# ✅ Service variations lookup (uses public key)
+# --- Get service variations ---
 def get_service_variations(service_id):
     """Fetch available plans/packages for a given service_id."""
     try:
@@ -52,10 +58,14 @@ def get_service_variations(service_id):
         r = requests.get(url, headers=headers, timeout=10)
         return r.json()
     except requests.exceptions.RequestException as e:
-        return {"code": "999", "response_description": "Network error", "raw": str(e)}
+        return {
+            "code": "999",
+            "response_description": "Network error",
+            "raw": str(e)
+        }
 
 
-# ✅ Airtime purchase — now accepts custom request_id for idempotency
+# --- Airtime purchase ---
 def purchase_airtime(network, phone, amount, request_id=None):
     service_id = AIRTIME_SERVICE_IDS.get(network.lower())
     if not service_id:
@@ -67,6 +77,7 @@ def purchase_airtime(network, phone, amount, request_id=None):
         "amount": str(amount),
         "phone": phone
     }
+
     try:
         r = requests.post(
             f"{VTPASS_BASE_URL}/pay",
@@ -83,7 +94,7 @@ def purchase_airtime(network, phone, amount, request_id=None):
         }
 
 
-# ✅ Data purchase — now accepts custom request_id for idempotency
+# --- Data purchase ---
 def purchase_data(network, phone, plan_code, request_id=None):
     service_id = DATA_SERVICE_IDS.get(network.lower())
     if not service_id:
@@ -96,6 +107,7 @@ def purchase_data(network, phone, plan_code, request_id=None):
         "variation_code": plan_code,
         "phone": phone
     }
+
     try:
         r = requests.post(
             f"{VTPASS_BASE_URL}/pay",

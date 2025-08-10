@@ -32,23 +32,11 @@ class SafePaginator(PageNumberPagination):
 
 
 def _to_plain_dict(maybe_mapping):
-    """
-    Convert DRF QueryDict / dict-like to a plain dict of scalars.
-    If it's already a dict, return as-is.
-    If it's a string, try json.loads; else return {}.
-    """
+    """Convert DRF QueryDict or string to plain dict."""
     if isinstance(maybe_mapping, dict):
         return maybe_mapping
-    # DRF QueryDict has .items()
     if hasattr(maybe_mapping, "items"):
-        out = {}
-        for k, v in maybe_mapping.items():
-            # QueryDict can yield lists; pick first scalar
-            if isinstance(v, (list, tuple)):
-                out[k] = v[0] if v else None
-            else:
-                out[k] = v
-        return out
+        return {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in maybe_mapping.items()}
     if isinstance(maybe_mapping, (bytes, bytearray)):
         try:
             return json.loads(maybe_mapping.decode("utf-8"))
@@ -63,7 +51,7 @@ def _to_plain_dict(maybe_mapping):
 
 
 def _to_plain_json(maybe_json):
-    """Ensure provider response is a dict; if string, try json.loads; else wrap."""
+    """Ensure provider response is always dict."""
     if isinstance(maybe_json, dict):
         return maybe_json
     if isinstance(maybe_json, (bytes, bytearray)):
@@ -80,6 +68,7 @@ def _to_plain_json(maybe_json):
 
 
 def apply_txn_filters(qs, request):
+    """Filter transactions by query params."""
     status_val = request.query_params.get("status")
     network = request.query_params.get("network")
     search = request.query_params.get("search")
@@ -104,37 +93,27 @@ def apply_txn_filters(qs, request):
 
     ordering = request.query_params.get("ordering")
     allowed = {"timestamp", "-timestamp", "amount", "-amount"}
-    qs = qs.order_by(ordering) if ordering in allowed else qs.order_by("-timestamp")
-    return qs
+    return qs.order_by(ordering) if ordering in allowed else qs.order_by("-timestamp")
 
 
 def validate_request_fields(data, required_fields):
+    """Ensure all required fields exist."""
     for field in required_fields:
         if field not in data or data[field] in ("", None):
             return f"{field} is required."
     return None
 
 
-# ---------- views ----------
+# ---------- Airtime ----------
 @extend_schema(
-    description="Purchase airtime (VTpass behind the scenes; MOCK/LIVE via PROVIDER_MODE).",
+    description="Purchase airtime via VTpass (sandbox/live based on PROVIDER_MODE).",
     request=AirtimePurchaseRequestSchema,
     responses={
         201: AirtimeTransactionSerializer,
-        200: AirtimeTransactionSerializer,  # idempotent repeat
+        200: AirtimeTransactionSerializer,
         400: OpenApiResponse(description="Bad request"),
         500: OpenApiResponse(description="Server error"),
-    },
-    parameters=[
-        OpenApiParameter(name="status", description="successful|failed|pending", required=False, type=str),
-        OpenApiParameter(name="network", description="mtn|glo|airtel|9mobile", required=False, type=str),
-        OpenApiParameter(name="search", description="phone or client_reference", required=False, type=str),
-        OpenApiParameter(name="date_from", description="YYYY-MM-DD >=", required=False, type=str),
-        OpenApiParameter(name="date_to", description="YYYY-MM-DD <=", required=False, type=str),
-        OpenApiParameter(name="ordering", description="timestamp|-timestamp|amount|-amount", required=False, type=str),
-        OpenApiParameter(name="page", required=False, type=int),
-        OpenApiParameter(name="page_size", required=False, type=int),
-    ],
+    }
 )
 class AirtimePurchaseView(APIView):
     permission_classes = [IsAuthenticated]
@@ -156,7 +135,7 @@ class AirtimePurchaseView(APIView):
 
         client_ref = data["client_reference"]
 
-        # Idempotency: return existing if seen before
+        # Idempotency check
         existing = AirtimeTransaction.objects.filter(client_reference=client_ref).first()
         if existing:
             return Response(AirtimeTransactionSerializer(existing).data, status=status.HTTP_200_OK)
@@ -175,6 +154,7 @@ class AirtimePurchaseView(APIView):
                 if wallet.balance < amount:
                     return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
 
+                # Lock funds
                 wallet.balance -= amount
                 wallet.save()
 
@@ -187,7 +167,7 @@ class AirtimePurchaseView(APIView):
                     client_reference=client_ref,
                 )
 
-                # Provider call (pass idempotency as request_id)
+                # Call VTpass
                 vt_raw = purchase_airtime(data["network"], data["phone"], amount, request_id=client_ref)
                 vtpass_response = _to_plain_json(vt_raw)
 
@@ -203,6 +183,7 @@ class AirtimePurchaseView(APIView):
                 txn.status = "successful" if vtpass_response.get("code") == "000" else "failed"
                 txn.save()
 
+                # Refund if failed
                 if txn.status != "successful":
                     wallet.balance += amount
                     wallet.save()
@@ -215,25 +196,16 @@ class AirtimePurchaseView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# ---------- Data ----------
 @extend_schema(
-    description="Purchase data (VTpass behind the scenes; MOCK/LIVE via PROVIDER_MODE).",
+    description="Purchase data via VTpass (sandbox/live based on PROVIDER_MODE).",
     request=DataPurchaseRequestSchema,
     responses={
         201: DataTransactionSerializer,
-        200: DataTransactionSerializer,  # idempotent repeat
+        200: DataTransactionSerializer,
         400: OpenApiResponse(description="Bad request"),
         500: OpenApiResponse(description="Server error"),
-    },
-    parameters=[
-        OpenApiParameter(name="status", description="successful|failed|pending", required=False, type=str),
-        OpenApiParameter(name="network", description="mtn|glo|airtel|9mobile", required=False, type=str),
-        OpenApiParameter(name="search", description="phone or client_reference", required=False, type=str),
-        OpenApiParameter(name="date_from", description="YYYY-MM-DD >=", required=False, type=str),
-        OpenApiParameter(name="date_to", description="YYYY-MM-DD <=", required=False, type=str),
-        OpenApiParameter(name="ordering", description="timestamp|-timestamp|amount|-amount", required=False, type=str),
-        OpenApiParameter(name="page", required=False, type=int),
-        OpenApiParameter(name="page_size", required=False, type=int),
-    ],
+    }
 )
 class DataPurchaseView(APIView):
     permission_classes = [IsAuthenticated]
@@ -255,7 +227,7 @@ class DataPurchaseView(APIView):
 
         client_ref = data["client_reference"]
 
-        # Idempotency
+        # Idempotency check
         existing = DataTransaction.objects.filter(client_reference=client_ref).first()
         if existing:
             return Response(DataTransactionSerializer(existing).data, status=status.HTTP_200_OK)
@@ -274,6 +246,7 @@ class DataPurchaseView(APIView):
                 if wallet.balance < amount:
                     return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
 
+                # Lock funds
                 wallet.balance -= amount
                 wallet.save()
 
@@ -282,11 +255,12 @@ class DataPurchaseView(APIView):
                     amount=amount,
                     network=str(data["network"]).lower(),
                     phone=data["phone"],
-                    plan=data["plan"],
+                    plan=data["plan"],  # plan = VTpass variation_code
                     status="pending",
                     client_reference=client_ref,
                 )
 
+                # Call VTpass with variation_code
                 vt_raw = purchase_data(data["network"], data["phone"], data["plan"], request_id=client_ref)
                 vtpass_response = _to_plain_json(vt_raw)
 
@@ -302,6 +276,7 @@ class DataPurchaseView(APIView):
                 txn.status = "successful" if vtpass_response.get("code") == "000" else "failed"
                 txn.save()
 
+                # Refund if failed
                 if txn.status != "successful":
                     wallet.balance += amount
                     wallet.save()
