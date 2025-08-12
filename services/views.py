@@ -1,5 +1,7 @@
+# services/views.py
 from decimal import Decimal
 import json
+from typing import Any, Dict
 
 from django.db import transaction
 from django.db.models import Q
@@ -11,17 +13,28 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
+from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 from wallets.models import Wallet
 from .models import AirtimeTransaction, DataTransaction, ProviderLog
 from .serializers import (
     AirtimeTransactionSerializer,
     DataTransactionSerializer,
-    AirtimePurchaseRequestSchema,
-    DataPurchaseRequestSchema,
+    # If you adopted my new serializer names, import them directly:
+    AirtimePurchaseRequestSerializer,
+    DataPurchaseRequestSerializer,
 )
+# If your project still uses the old names in other places, these aliases help:
+AirtimePurchaseRequestSchema = AirtimePurchaseRequestSerializer
+DataPurchaseRequestSchema = DataPurchaseRequestSerializer
+
+# vtpass helper — supports both old (raw json) and new (stateful) versions
 from .vtpass import purchase_airtime, purchase_data
+try:
+    from .vtpass import requery_status, get_service_variations  # new helpers
+except Exception:
+    requery_status = None
+    get_service_variations = None
 
 
 # ---------- small utils ----------
@@ -31,7 +44,7 @@ class SafePaginator(PageNumberPagination):
     max_page_size = 100
 
 
-def _to_plain_dict(maybe_mapping):
+def _to_plain_dict(maybe_mapping: Any) -> Dict:
     """Convert DRF QueryDict or string to plain dict."""
     if isinstance(maybe_mapping, dict):
         return maybe_mapping
@@ -50,7 +63,7 @@ def _to_plain_dict(maybe_mapping):
     return {}
 
 
-def _to_plain_json(maybe_json):
+def _to_plain_json(maybe_json: Any) -> Dict:
     """Ensure provider response is always dict."""
     if isinstance(maybe_json, dict):
         return maybe_json
@@ -96,12 +109,55 @@ def apply_txn_filters(qs, request):
     return qs.order_by(ordering) if ordering in allowed else qs.order_by("-timestamp")
 
 
-def validate_request_fields(data, required_fields):
-    """Ensure all required fields exist."""
-    for field in required_fields:
-        if field not in data or data[field] in ("", None):
-            return f"{field} is required."
-    return None
+def _map_provider_state(provider_body: Dict) -> str:
+    """
+    Normalize VTpass response:
+    - If using my new vtpass.py → provider returns "state" directly.
+    - Else fallback to "code" mapping.
+    """
+    # New helper shape
+    state = str(provider_body.get("state", "")).lower()
+    if state in {"success", "successful"}:
+        return "successful"
+    if state == "pending":
+        return "pending"
+    if state == "failed":
+        return "failed"
+
+    # Old VTpass raw shape
+    code = str(provider_body.get("code", "")).strip()
+    if code == "000":
+        return "successful"
+    if code in {"099", "016"}:
+        return "pending"
+    return "failed"
+
+
+def _provider_status_code(provider_body: Dict) -> str:
+    # prefer VTpass "code"; fallback to embedded http_status if present
+    code = provider_body.get("code")
+    if code is not None:
+        return str(code)
+    return str(provider_body.get("http_status", "unknown"))
+
+
+def _log_provider(user, service_type: str, client_reference: str, request_payload: Dict, response_payload: Dict):
+    """
+    Centralized ProviderLog write. Keeps your current model fields.
+    (If you later add more fields to ProviderLog, update only here.)
+    """
+    try:
+        ProviderLog.objects.create(
+            user=user,
+            service_type=service_type,             # 'airtime' | 'data' | 'vtpass'
+            client_reference=client_reference,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            status_code=_provider_status_code(response_payload),
+        )
+    except Exception:
+        # Logging must never break the purchase flow
+        pass
 
 
 # ---------- Airtime ----------
@@ -113,7 +169,7 @@ def validate_request_fields(data, required_fields):
         200: AirtimeTransactionSerializer,
         400: OpenApiResponse(description="Bad request"),
         500: OpenApiResponse(description="Server error"),
-    }
+    },
 )
 class AirtimePurchaseView(APIView):
     permission_classes = [IsAuthenticated]
@@ -127,65 +183,55 @@ class AirtimePurchaseView(APIView):
 
     def post(self, request):
         user = request.user
-        data = _to_plain_dict(request.data)
+        payload = _to_plain_dict(request.data)
 
-        error = validate_request_fields(data, ["amount", "network", "phone", "client_reference"])
-        if error:
-            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        # Validate input
+        serializer = AirtimePurchaseRequestSchema(data=payload)
+        serializer.is_valid(raise_exception=True)
+        amt = Decimal(str(serializer.validated_data["amount"]))
+        network = serializer.validated_data["network"]
+        phone = serializer.validated_data["phone"]
+        client_ref = serializer.validated_data.get("client_reference") or f"AIRTIME_{user.id}_{AirtimeTransaction.objects.count()+1}"
 
-        client_ref = data["client_reference"]
-
-        # Idempotency check
+        # Idempotency: return existing txn if same client_reference already used
         existing = AirtimeTransaction.objects.filter(client_reference=client_ref).first()
         if existing:
             return Response(AirtimeTransactionSerializer(existing).data, status=status.HTTP_200_OK)
 
-        # Validate amount
-        try:
-            amount = Decimal(str(data["amount"]))
-            if amount <= 0:
-                raise ValueError
-        except Exception:
-            return Response({"error": "Invalid amount."}, status=status.HTTP_400_BAD_REQUEST)
-
         try:
             with transaction.atomic():
                 wallet = Wallet.objects.select_for_update().get(user=user)
-                if wallet.balance < amount:
+                if wallet.balance < amt:
                     return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
 
-                # Lock funds
-                wallet.balance -= amount
+                # Lock funds by deducting; refund on fail
+                wallet.balance -= amt
                 wallet.save()
 
                 txn = AirtimeTransaction.objects.create(
                     user=user,
-                    amount=amount,
-                    network=str(data["network"]).lower(),
-                    phone=data["phone"],
+                    amount=amt,
+                    network=network,
+                    phone=phone,
                     status="pending",
                     client_reference=client_ref,
                 )
 
                 # Call VTpass
-                vt_raw = purchase_airtime(data["network"], data["phone"], amount, request_id=client_ref)
-                vtpass_response = _to_plain_json(vt_raw)
+                raw = purchase_airtime(network, phone, amt, request_id=client_ref)
+                provider = _to_plain_json(raw)
+                _log_provider(user, "airtime", client_ref, payload, provider)
 
-                ProviderLog.objects.create(
-                    user=user,
-                    service_type="airtime",
-                    client_reference=client_ref,
-                    request_payload=data,
-                    response_payload=vtpass_response,
-                    status_code=str(vtpass_response.get("code", "unknown")),
-                )
-
-                txn.status = "successful" if vtpass_response.get("code") == "000" else "failed"
+                # Map state and update txn
+                new_status = _map_provider_state(provider)
+                txn.status = new_status
+                # optional provider metadata
+                txn.provider_status = str(provider.get("response_description", ""))[:64]
                 txn.save()
 
-                # Refund if failed
-                if txn.status != "successful":
-                    wallet.balance += amount
+                # If failed → refund immediately
+                if new_status == "failed":
+                    wallet.balance += amt
                     wallet.save()
 
                 return Response(AirtimeTransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
@@ -205,7 +251,7 @@ class AirtimePurchaseView(APIView):
         200: DataTransactionSerializer,
         400: OpenApiResponse(description="Bad request"),
         500: OpenApiResponse(description="Server error"),
-    }
+    },
 )
 class DataPurchaseView(APIView):
     permission_classes = [IsAuthenticated]
@@ -219,66 +265,56 @@ class DataPurchaseView(APIView):
 
     def post(self, request):
         user = request.user
-        data = _to_plain_dict(request.data)
+        payload = _to_plain_dict(request.data)
 
-        error = validate_request_fields(data, ["amount", "network", "phone", "plan", "client_reference"])
-        if error:
-            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        # Validate input
+        serializer = DataPurchaseRequestSchema(data=payload)
+        serializer.is_valid(raise_exception=True)
+        amt = Decimal(str(serializer.validated_data["amount"]))
+        network = serializer.validated_data["network"]
+        phone = serializer.validated_data["phone"]
+        plan = serializer.validated_data["plan"]  # VTpass variation_code
+        client_ref = serializer.validated_data.get("client_reference") or f"DATA_{user.id}_{DataTransaction.objects.count()+1}"
 
-        client_ref = data["client_reference"]
-
-        # Idempotency check
+        # Idempotency
         existing = DataTransaction.objects.filter(client_reference=client_ref).first()
         if existing:
             return Response(DataTransactionSerializer(existing).data, status=status.HTTP_200_OK)
 
-        # Validate amount
-        try:
-            amount = Decimal(str(data["amount"]))
-            if amount <= 0:
-                raise ValueError
-        except Exception:
-            return Response({"error": "Invalid amount."}, status=status.HTTP_400_BAD_REQUEST)
-
         try:
             with transaction.atomic():
                 wallet = Wallet.objects.select_for_update().get(user=user)
-                if wallet.balance < amount:
+                if wallet.balance < amt:
                     return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
 
                 # Lock funds
-                wallet.balance -= amount
+                wallet.balance -= amt
                 wallet.save()
 
                 txn = DataTransaction.objects.create(
                     user=user,
-                    amount=amount,
-                    network=str(data["network"]).lower(),
-                    phone=data["phone"],
-                    plan=data["plan"],  # plan = VTpass variation_code
+                    amount=amt,
+                    network=network,
+                    phone=phone,
+                    plan=plan,
                     status="pending",
                     client_reference=client_ref,
                 )
 
-                # Call VTpass with variation_code
-                vt_raw = purchase_data(data["network"], data["phone"], data["plan"], request_id=client_ref)
-                vtpass_response = _to_plain_json(vt_raw)
+                # Call VTpass
+                raw = purchase_data(network, phone, plan, request_id=client_ref)
+                provider = _to_plain_json(raw)
+                _log_provider(user, "data", client_ref, payload, provider)
 
-                ProviderLog.objects.create(
-                    user=user,
-                    service_type="data",
-                    client_reference=client_ref,
-                    request_payload=data,
-                    response_payload=vtpass_response,
-                    status_code=str(vtpass_response.get("code", "unknown")),
-                )
-
-                txn.status = "successful" if vtpass_response.get("code") == "000" else "failed"
+                # Map state and update txn
+                new_status = _map_provider_state(provider)
+                txn.status = new_status
+                txn.provider_status = str(provider.get("response_description", ""))[:64]
                 txn.save()
 
-                # Refund if failed
-                if txn.status != "successful":
-                    wallet.balance += amount
+                # If failed → refund
+                if new_status == "failed":
+                    wallet.balance += amt
                     wallet.save()
 
                 return Response(DataTransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
@@ -287,3 +323,73 @@ class DataPurchaseView(APIView):
             return Response({"error": "Wallet not found."}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ---------- Status Requery ----------
+@extend_schema(
+    description="Re-query provider status for a given client_reference and reconcile the transaction.",
+    responses={
+        200: OpenApiResponse(description="Status checked / reconciled"),
+        404: OpenApiResponse(description="Transaction not found"),
+        501: OpenApiResponse(description="Requery not available"),
+    },
+)
+class PurchaseStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, client_reference: str):
+        if requery_status is None:
+            return Response({"detail": "Requery not available."}, status=501)
+
+        # Find either airtime or data txn for this user
+        airtime = AirtimeTransaction.objects.filter(user=request.user, client_reference=client_reference).first()
+        data = None if airtime else DataTransaction.objects.filter(user=request.user, client_reference=client_reference).first()
+        txn = airtime or data
+        if not txn:
+            return Response({"detail": "Transaction not found."}, status=404)
+
+        provider = _to_plain_json(requery_status(client_reference))
+        _log_provider(request.user, "vtpass", client_reference, {"action": "requery"}, provider)
+
+        new_status = _map_provider_state(provider)
+        if new_status != txn.status:
+            # Update status + provider status text
+            txn.status = new_status
+            if hasattr(txn, "provider_status"):
+                txn.provider_status = str(provider.get("response_description", ""))[:64]
+            txn.save()
+
+            # Handle refunds if it changed to failed and money was still locked
+            if new_status == "failed":
+                try:
+                    with transaction.atomic():
+                        wallet = Wallet.objects.select_for_update().get(user=request.user)
+                        wallet.balance += txn.amount
+                        wallet.save()
+                except Wallet.DoesNotExist:
+                    pass
+
+        # Return fresh serialized txn
+        if airtime:
+            return Response(AirtimeTransactionSerializer(txn).data)
+        return Response(DataTransactionSerializer(txn).data)
+
+
+# ---------- Service Variations (e.g., data plans) ----------
+@extend_schema(
+    description="Get provider variations/plans (e.g., data bundles) for a given serviceID (e.g., 'mtn-data').",
+    responses={
+        200: OpenApiResponse(description="OK"),
+        400: OpenApiResponse(description="Bad request"),
+        501: OpenApiResponse(description="Variations not available"),
+    },
+)
+class ServiceVariationsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, service_id: str):
+        if get_service_variations is None:
+            return Response({"detail": "Variations not available."}, status=501)
+        res = get_service_variations(service_id)
+        return Response(res, status=200 if res.get("ok") else 400)
+
