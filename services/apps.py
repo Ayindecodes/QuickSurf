@@ -1,8 +1,13 @@
 # services/apps.py
 from django.apps import AppConfig
-from django.core.checks import register, Warning
+from django.core.checks import register, Warning, Error
+from django.conf import settings
 from importlib import import_module
-from decouple import config
+import logging
+
+logger = logging.getLogger(__name__)
+
+_last_signals_import_error = None  # module-level flag for the system check
 
 
 class ServicesConfig(AppConfig):
@@ -12,47 +17,48 @@ class ServicesConfig(AppConfig):
 
     def ready(self):
         """
-        - Import signals safely so they register when Django starts.
-        - Register system checks for provider configuration.
+        - Import signals so they register when Django starts.
+        - Never crash app on import error; record it and surface via system checks.
         """
-        # --- Import signals (safe) ---
+        global _last_signals_import_error
         try:
             import_module("services.signals")
         except ModuleNotFoundError:
             # No signals module yet; that's fine.
-            pass
+            logger.info("services.signals not found; skipping.")
         except Exception as e:
-            # Don't crash app if signals import fails; surface a readable warning instead.
-            from django.core.checks import Error
-            @register()  # register immediately with the specific error
-            def _signals_import_error_check(app_configs, **kwargs):
-                return [
-                    Error(
-                        f"services.signals import failed: {e}",
-                        id="services.E001",
-                        hint="Check for import loops or syntax errors in services/signals.py",
-                    )
-                ]
-            # still return to avoid re-raising
+            _last_signals_import_error = e
+            logger.exception("services.signals import failed")
 
 
 # -------------------------
-# System checks (VTpass keys)
+# System checks (signals + VTpass keys)
 # -------------------------
 @register()
-def provider_config_check(app_configs, **kwargs):
+def services_system_checks(app_configs, **kwargs):
     """
-    Warn if PROVIDER_MODE is LIVE but VTpass keys are missing.
-    This runs at startup and with `python manage.py check`.
+    - Report if signals failed to import.
+    - Warn if LIVE mode is set but VTpass keys are missing.
     """
     messages = []
 
-    provider_mode = config("PROVIDER_MODE", default="MOCK").upper()
+    # 1) Signals import health
+    if _last_signals_import_error is not None:
+        messages.append(
+            Error(
+                f"services.signals import failed: {_last_signals_import_error}",
+                id="services.E001",
+                hint="Check for import loops or syntax errors in services/signals.py",
+            )
+        )
+
+    # 2) Provider config sanity (use Django settings, not env directly)
+    provider_mode = str(getattr(settings, "PROVIDER_MODE", "MOCK")).upper()
     if provider_mode == "LIVE":
         required = {
-            "VTPASS_EMAIL": config("VTPASS_EMAIL", default=""),
-            "VTPASS_API_KEY": config("VTPASS_API_KEY", default=""),
-            "VTPASS_PUBLIC_KEY": config("VTPASS_PUBLIC_KEY", default=""),
+            "VTPASS_EMAIL": getattr(settings, "VTPASS_EMAIL", ""),
+            "VTPASS_API_KEY": getattr(settings, "VTPASS_API_KEY", ""),
+            "VTPASS_PUBLIC_KEY": getattr(settings, "VTPASS_PUBLIC_KEY", ""),
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
@@ -60,7 +66,8 @@ def provider_config_check(app_configs, **kwargs):
                 Warning(
                     "VTpass LIVE mode is enabled but some credentials are missing.",
                     id="services.W001",
-                    hint=f"Missing .env keys: {', '.join(missing)}",
+                    hint=f"Missing settings: {', '.join(missing)}",
                 )
             )
+
     return messages

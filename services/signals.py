@@ -1,6 +1,7 @@
 # services/signals.py
 from decimal import Decimal, ROUND_DOWN
 from django.conf import settings
+from django.db import transaction
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 
@@ -8,13 +9,13 @@ from rewards.models import LoyaltyLedger
 from notifications.utils import send_receipt_email
 from .models import AirtimeTransaction, DataTransaction
 
-
 # Configurable via settings.py (fallbacks keep current behavior)
 POINTS_PER_NAIRA = Decimal(getattr(settings, "POINTS_PER_NAIRA", "0.01"))  # ₦100 -> 1 point
 REWARDS_ENABLED = getattr(settings, "REWARDS_ENABLED", True)
 RECEIPT_EMAILS_ENABLED = getattr(settings, "RECEIPT_EMAILS_ENABLED", True)
 
-SUCCESS_VALUES = {"successful", "success"}  # be lenient with status spelling
+# Accept both spellings just in case
+SUCCESS_VALUES = {"successful", "success"}
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -37,15 +38,15 @@ def _mask_msisdn(msisdn: str) -> str:
 
 
 def _receipt_text(user, txn, label):
-    first = getattr(user, "first_name", "") or user.email
+    first = getattr(user, "first_name", "") or getattr(user, "email", "") or "Customer"
     lines = [
         f"Hi {first},",
         "",
         "Payment received.",
         "",
         f"Service: {label}",
-        f"Network: {txn.network}",
-        f"Phone: {_mask_msisdn(txn.phone)}",
+        f"Network: {getattr(txn, 'network', '')}",
+        f"Phone: {_mask_msisdn(getattr(txn, 'phone', ''))}",
         f"Amount: ₦{txn.amount}",
         f"Status: {txn.status}",
         f"Time: {txn.timestamp}",
@@ -89,7 +90,7 @@ def _attach_old_status(instance):
     """
     Attach the previous status to instance._old_status for transition checks.
     """
-    if not instance.pk:
+    if not getattr(instance, "pk", None):
         instance._old_status = None
         return
     try:
@@ -109,15 +110,17 @@ def _data_presave(sender, instance: DataTransaction, **kwargs):
     _attach_old_status(instance)
 
 
-# --- Post-save: fire on transition to success --------------------------------
+# --- Post-save: fire on transition to success (AFTER COMMIT) -----------------
 
 @receiver(post_save, sender=AirtimeTransaction)
 def on_airtime_success(sender, instance: AirtimeTransaction, created, **kwargs):
     new_ok = str(instance.status).lower() in SUCCESS_VALUES
     old_ok = str(getattr(instance, "_old_status", "")).lower() in SUCCESS_VALUES
     if new_ok and not old_ok:
-        _award_points(instance.user, instance.amount, "Airtime purchase", "airtime", instance.id)
-        _send_receipt(instance.user, instance, "Airtime", "Receipt - Airtime Purchase")
+        def _after_commit():
+            _award_points(instance.user, instance.amount, "Airtime purchase", "airtime", instance.id)
+            _send_receipt(instance.user, instance, "Airtime", "Receipt - Airtime Purchase")
+        transaction.on_commit(_after_commit)
 
 
 @receiver(post_save, sender=DataTransaction)
@@ -125,5 +128,8 @@ def on_data_success(sender, instance: DataTransaction, created, **kwargs):
     new_ok = str(instance.status).lower() in SUCCESS_VALUES
     old_ok = str(getattr(instance, "_old_status", "")).lower() in SUCCESS_VALUES
     if new_ok and not old_ok:
-        _award_points(instance.user, instance.amount, "Data purchase", "data", instance.id)
-        _send_receipt(instance.user, instance, "Data", "Receipt - Data Purchase")
+        def _after_commit():
+            _award_points(instance.user, instance.amount, "Data purchase", "data", instance.id)
+            _send_receipt(instance.user, instance, "Data", "Receipt - Data Purchase")
+        transaction.on_commit(_after_commit)
+

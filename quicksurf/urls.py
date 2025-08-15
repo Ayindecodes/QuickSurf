@@ -27,7 +27,7 @@ urlpatterns = [
 
     # --- Users & Wallets ---
     path("api/users/", include("users.urls")),
-    path("api/wallets/", include("wallets.urls")),
+    path("api/", include("wallets.urls")), 
 
     # --- Services (airtime & data, includes status/variations we added) ---
     path("api/services/", include("services.urls")),

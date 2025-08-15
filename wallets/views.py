@@ -1,12 +1,14 @@
+# wallets/views.py
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 
-from drf_spectacular.utils import extend_schema, OpenApiTypes, OpenApiResponse, OpenApiParameter
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
 
 from .models import Wallet
+from services.models import AirtimeTransaction, DataTransaction
 from .serializers import (
     WalletBalanceSerializer,
     TransactionSerializer,
@@ -41,6 +43,50 @@ class WalletBalanceView(APIView):
 
 
 @extend_schema(
+    description="Balance + last 10 airtime/data purchases for the authenticated user.",
+    request=None,
+    responses={200: OpenApiResponse(description="Summary payload"), 404: OpenApiResponse(description="Wallet not found.")},
+)
+class WalletSummaryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            wallet = Wallet.objects.get(user=request.user)
+        except Wallet.DoesNotExist:
+            return Response({"detail": "Wallet not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        airtime = AirtimeTransaction.objects.filter(user=request.user).order_by("-timestamp")[:10]
+        data = DataTransaction.objects.filter(user=request.user).order_by("-timestamp")[:10]
+
+        return Response({
+            "balance": str(wallet.balance),
+            "locked": str(getattr(wallet, "locked_amount", 0)),
+            "recent_airtime": [{
+                "amount": str(t.amount),
+                "network": t.network,
+                "phone": t.phone,
+                "status": t.status,
+                "client_reference": t.client_reference,
+                "provider_request_id": t.provider_request_id,
+                "provider_status": t.provider_status,
+                "timestamp": t.timestamp,
+            } for t in airtime],
+            "recent_data": [{
+                "amount": str(t.amount),
+                "network": t.network,
+                "phone": t.phone,
+                "plan": t.plan,
+                "status": t.status,
+                "client_reference": t.client_reference,
+                "provider_request_id": t.provider_request_id,
+                "provider_status": t.provider_status,
+                "timestamp": t.timestamp,
+            } for t in data],
+        }, status=status.HTTP_200_OK)
+
+
+@extend_schema(
     description="List the authenticated user's wallet transactions (most recent first).",
     request=None,
     parameters=[
@@ -55,14 +101,15 @@ class TransactionListView(APIView):
     def get(self, request):
         try:
             wallet = Wallet.objects.get(user=request.user)
-            qs = wallet.transactions.all().order_by('-timestamp')
-
-            paginator = SafePaginator()
-            page = paginator.paginate_queryset(qs, request)
-            serializer = TransactionSerializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
         except Wallet.DoesNotExist:
             return Response({"detail": "Wallet not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        qs = wallet.transactions.all().order_by("-timestamp")
+
+        paginator = SafePaginator()
+        page = paginator.paginate_queryset(qs, request)
+        serializer = TransactionSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
 @extend_schema(
@@ -74,7 +121,7 @@ class CreditView(APIView):
     permission_classes = [IsAdminUser]
 
     def post(self, request):
-        serializer = CreditSerializer(data=request.data, context={'request': request})
+        serializer = CreditSerializer(data=request.data, context={"request": request})
         if serializer.is_valid():
             tx = serializer.save()
             return Response(TransactionSerializer(tx).data, status=status.HTTP_201_CREATED)
@@ -90,11 +137,8 @@ class LockFundsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        data = {
-            'user': request.user.id,
-            'amount': request.data.get('amount')
-        }
-        serializer = LockSerializer(data=data, context={'request': request})
+        data = {"user": request.user.id, "amount": request.data.get("amount")}
+        serializer = LockSerializer(data=data, context={"request": request})
         if serializer.is_valid():
             tx = serializer.save()
             return Response(TransactionSerializer(tx).data, status=status.HTTP_201_CREATED)
@@ -110,11 +154,8 @@ class UnlockFundsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        data = {
-            'user': request.user.id,
-            'amount': request.data.get('amount')
-        }
-        serializer = UnlockSerializer(data=data, context={'request': request})
+        data = {"user": request.user.id, "amount": request.data.get("amount")}
+        serializer = UnlockSerializer(data=data, context={"request": request})
         if serializer.is_valid():
             tx = serializer.save()
             return Response(TransactionSerializer(tx).data, status=status.HTTP_201_CREATED)

@@ -1,6 +1,8 @@
+# wallets/urls.py
 from django.urls import path
 from .views import (
     WalletBalanceView,
+    WalletSummaryView,
     TransactionListView,
     CreditView,
     LockFundsView,
@@ -8,9 +10,10 @@ from .views import (
 )
 
 urlpatterns = [
-    path('balance/', WalletBalanceView.as_view(), name='wallet-balance'),
-    path('transactions/', TransactionListView.as_view(), name='wallet-transactions'),
-    path('credit/', CreditView.as_view(), name='credit-wallet'),
-    path('lock/', LockFundsView.as_view(), name='lock-funds'),
-    path('unlock/', UnlockFundsView.as_view(), name='unlock-funds'),
+    path("wallet/", WalletBalanceView.as_view(), name="wallet-balance"),
+    path("wallet/summary/", WalletSummaryView.as_view(), name="wallet-summary"),
+    path("wallet/transactions/", TransactionListView.as_view(), name="wallet-transactions"),
+    path("wallet/credit/", CreditView.as_view(), name="wallet-credit"),
+    path("wallet/lock/", LockFundsView.as_view(), name="wallet-lock"),
+    path("wallet/unlock/", UnlockFundsView.as_view(), name="wallet-unlock"),
 ]

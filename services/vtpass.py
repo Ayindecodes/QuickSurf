@@ -2,7 +2,7 @@
 import base64
 import uuid
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Any
 
 import requests
 from decouple import config
@@ -14,10 +14,10 @@ PROVIDER_MODE = config("PROVIDER_MODE", default="MOCK").upper()  # LIVE | MOCK
 VTPASS_EMAIL = config("VTPASS_EMAIL", default="")
 VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
-
-VTPASS_BASE_URL = (
-    "https://vtpass.com/api" if PROVIDER_MODE == "LIVE" else "https://sandbox.vtpass.com/api"
-)
+VTPASS_BASE_URL = config(
+    "VTPASS_BASE_URL",
+    default=("https://vtpass.com/api" if PROVIDER_MODE == "LIVE" else "https://sandbox.vtpass.com/api"),
+).rstrip("/")
 
 DEFAULT_TIMEOUT = 15
 MAX_RETRIES = 2  # small, to avoid duplicate live charges on flaky networks
@@ -55,7 +55,6 @@ def _mask_value(val: Optional[str]) -> str:
         return ""
     s = str(val)
     if "@" in s:
-        # mask email
         name, _, domain = s.partition("@")
         return (name[:2] + "***@" + domain) if name else "***@" + domain
     if s.isdigit() and len(s) >= 7:
@@ -76,6 +75,23 @@ def _mask_payload(payload: Dict) -> Dict:
     return masked
 
 
+def _safe_json(resp: requests.Response) -> Dict:
+    """
+    Always return a dict and include http_status.
+    If the provider returns non-JSON (e.g., HTML for 401), wrap it as {"raw": "..."}.
+    """
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            body.setdefault("http_status", resp.status_code)
+            return body
+        # JSON but not a dict (list/str/etc) → wrap it
+        return {"raw": body, "http_status": resp.status_code}
+    except Exception:
+        txt = getattr(resp, "text", "")
+        return {"raw": txt, "http_status": resp.status_code}
+
+
 def _request(
     method: str,
     path: str,
@@ -92,7 +108,7 @@ def _request(
     Only retries on connection/timeouts (pre-flight).
     """
     url = f"{VTPASS_BASE_URL}{path}"
-    last_exc = None
+    last_exc: Optional[Exception] = None
 
     for attempt in range(retries + 1):
         try:
@@ -104,6 +120,8 @@ def _request(
                 params=params,
                 timeout=timeout,
             )
+            parsed = _safe_json(resp)
+
             # Log once per attempt (masked)
             if log_fn:
                 log_fn({
@@ -112,16 +130,25 @@ def _request(
                     "status_code": resp.status_code,
                     "request_id": (json or params or {}).get("request_id"),
                     "request": _mask_payload(json or params or {}),
-                    "response": _mask_payload(_safe_json(resp)),
+                    "response": _mask_payload(parsed),
                 })
-            return resp.status_code, _safe_json(resp)
+
+            return resp.status_code, parsed
+
         except requests.exceptions.RequestException as e:
             last_exc = e
             if attempt < retries:
                 time.sleep(0.8)  # brief backoff
                 continue
+
             # Final failure (network)
             payload = json or params or {}
+            parsed_err = {
+                "code": "999",
+                "response_description": "Network error",
+                "error": str(e),
+                "http_status": 0,
+            }
             if log_fn:
                 log_fn({
                     "service": "vtpass",
@@ -129,37 +156,36 @@ def _request(
                     "status_code": 0,
                     "request_id": payload.get("request_id"),
                     "request": _mask_payload(payload),
-                    "response": {"error": str(e)},
+                    "response": _mask_payload(parsed_err),
                 })
-            return 0, {
-                "code": "999",
-                "response_description": "Network error",
-                "error": str(e),
-            }
+            return 0, parsed_err
+
     # Should not reach here
     raise RuntimeError(f"Unexpected _request flow. Last error: {last_exc}")
 
 
-def _safe_json(resp: requests.Response) -> Dict:
-    try:
-        return resp.json()
-    except Exception:
-        return {"raw": resp.text}
-
-
-def map_provider_state(payload: Dict) -> Tuple[str, bool]:
+def map_provider_state(payload: Any) -> Tuple[str, bool]:
     """
     Map VTpass provider 'code' to internal state.
-    - "000" => success
-    - "099" and some others may indicate pending (VTpass will confirm via status)
+    - "000" => successful
+    - "099" and "016" => pending
     - anything else => failed
-    Returns (state, ok)
+
+    Returns (state, ok). Accepts any payload type and defaults to failed on non-dict.
     """
+    if not isinstance(payload, dict):
+        return "failed", False
+
     code = str(payload.get("code", "")).strip()
     if code == "000":
-        return "success", True
+        return "successful", True
     if code in {"099", "016"}:
-        # 016 often shows up for 'transaction in progress' on some services
+        return "pending", False
+
+    # If there's no 'code', fall back to http_status heuristics
+    http_status = str(payload.get("http_status", ""))
+    if http_status.startswith("2"):
+        # 2xx without code: be conservative
         return "pending", False
     return "failed", False
 
@@ -185,7 +211,15 @@ DATA_SERVICE_IDS = {
 # ------------------------------------------------------------------------------
 def get_service_variations(service_id: str, *, log_fn: Optional[Callable[[Dict], None]] = None) -> Dict:
     """
-    Fetch available plans/packages for a given service_id.
+    Fetch available plans/packages for a given service_id and normalize the response.
+    Always returns a dict with at least:
+      ok: bool
+      code: str
+      response_description: str
+      content: any (if provider returned it)
+      raw: full provider JSON
+      http_status: int
+      service_id: str
     """
     status, body = _request(
         "GET",
@@ -193,11 +227,25 @@ def get_service_variations(service_id: str, *, log_fn: Optional[Callable[[Dict],
         params={"serviceID": service_id},
         log_fn=log_fn,
     )
+
+    # body is guaranteed to be a dict from _safe_json
+    code = str(body.get("code", "")).strip() or str(status)
+    content = body.get("content")
+
+    variations = None
+    if isinstance(content, dict):
+        variations = content.get("variations")
+
+    ok = (status == 200) and (code == "000" or (isinstance(variations, list) and len(variations) > 0))
+
     return {
-        "ok": status == 200 and str(body.get("code", "")) in {"000"},
-        "state": "success" if str(body.get("code", "")) == "000" else "failed",
-        "provider": body,
-        "message": body.get("response_description") or "",
+        "ok": ok,
+        "code": code,
+        "response_description": body.get("response_description") or body.get("message") or "",
+        "content": content,
+        "raw": body,
+        "http_status": status,
+        "service_id": service_id,
     }
 
 
@@ -214,7 +262,7 @@ def purchase_airtime(
     """
     service_id = AIRTIME_SERVICE_IDS.get(network.lower())
     if not service_id:
-        return {"ok": False, "state": "failed", "message": f"Unsupported network: {network}"}
+        return {"ok": False, "state": "failed", "message": f"Unsupported network: {network}", "http_status": 400}
 
     rid = request_id or generate_request_id("AIRTIME")
     payload = {
@@ -224,10 +272,11 @@ def purchase_airtime(
         "phone": phone,
     }
     status, body = _request("POST", "/pay", json=payload, log_fn=log_fn)
+    # body is a dict; map defensively anyway
     state, ok = map_provider_state(body)
     return {
         "ok": ok,
-        "state": state,  # success | pending | failed
+        "state": state,              # "successful" | "pending" | "failed"
         "provider": body,
         "request_id": rid,
         "message": body.get("response_description") or "",
@@ -248,7 +297,7 @@ def purchase_data(
     """
     service_id = DATA_SERVICE_IDS.get(network.lower())
     if not service_id:
-        return {"ok": False, "state": "failed", "message": f"Unsupported network: {network}"}
+        return {"ok": False, "state": "failed", "message": f"Unsupported network: {network}", "http_status": 400}
 
     rid = request_id or generate_request_id("DATA")
     payload = {
@@ -262,7 +311,7 @@ def purchase_data(
     state, ok = map_provider_state(body)
     return {
         "ok": ok,
-        "state": state,
+        "state": state,             # "successful" | "pending" | "failed"
         "provider": body,
         "request_id": rid,
         "message": body.get("response_description") or "",
@@ -287,7 +336,7 @@ def requery_status(
     state, ok = map_provider_state(body)
     return {
         "ok": ok,
-        "state": state,
+        "state": state,             # "successful" | "pending" | "failed"
         "provider": body,
         "request_id": request_id,
         "message": body.get("response_description") or "",
