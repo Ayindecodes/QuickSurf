@@ -1,53 +1,68 @@
 # services/vtpass.py
-import base64
-import uuid
+from __future__ import annotations
+
 import time
+import uuid
+from datetime import datetime, timedelta
 from typing import Callable, Dict, Optional, Tuple, Any
 
 import requests
 from decouple import config
 
-# ------------------------------------------------------------------------------
-# Config
-# ------------------------------------------------------------------------------
+# ============================================================================
+# Configuration (LIVE or MOCK/SANDBOX via env)
+# ============================================================================
 PROVIDER_MODE = config("PROVIDER_MODE", default="MOCK").upper()  # LIVE | MOCK
-VTPASS_EMAIL = config("VTPASS_EMAIL", default="")
 VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
+VTPASS_SECRET_KEY = config("VTPASS_SECRET_KEY", default="")
 VTPASS_BASE_URL = config(
     "VTPASS_BASE_URL",
     default=("https://vtpass.com/api" if PROVIDER_MODE == "LIVE" else "https://sandbox.vtpass.com/api"),
 ).rstrip("/")
 
-DEFAULT_TIMEOUT = 15
-MAX_RETRIES = 2  # small, to avoid duplicate live charges on flaky networks
+CONNECT_TIMEOUT = 5
+READ_TIMEOUT = 25
+DEFAULT_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+MAX_RETRIES = 1  # retry only pre-flight network errors; never on HTTP responses
 
-# ------------------------------------------------------------------------------
+Session = requests.Session()
+
+
+# ============================================================================
 # Helpers
-# ------------------------------------------------------------------------------
-def _basic_auth_token() -> str:
-    auth_string = f"{VTPASS_EMAIL}:{VTPASS_API_KEY}"
-    return base64.b64encode(auth_string.encode()).decode()
+# ============================================================================
 
-
-def vtpass_headers(include_public_key: bool = True) -> Dict[str, str]:
+def _headers_for(method: str) -> Dict[str, str]:
     """
-    VTpass expects Basic auth using email:api_key. Public key is used on some GETs.
-    Keeping api-key on all calls is harmless and sometimes required by their edge.
+    VTpass (official docs):
+      - GET  : api-key + public-key
+      - POST : api-key + secret-key
     """
-    headers = {
-        "Authorization": f"Basic {_basic_auth_token()}",
+    m = (method or "GET").upper()
+    h = {
         "Content-Type": "application/json",
         "cache-control": "no-cache",
+        "api-key": VTPASS_API_KEY or "",
     }
-    if include_public_key and VTPASS_PUBLIC_KEY:
-        headers["api-key"] = VTPASS_PUBLIC_KEY
-    return headers
+    if m == "GET":
+        if VTPASS_PUBLIC_KEY:
+            h["public-key"] = VTPASS_PUBLIC_KEY
+    else:  # POST/PUT/etc.
+        if VTPASS_SECRET_KEY:
+            h["secret-key"] = VTPASS_SECRET_KEY
+    return h
 
 
-def generate_request_id(prefix: str = "REQ") -> str:
-    """Generate a unique client reference for idempotency."""
-    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+def _safe_json(resp: requests.Response) -> Dict:
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            body.setdefault("http_status", resp.status_code)
+            return body
+        return {"raw": body, "http_status": resp.status_code}
+    except Exception:
+        return {"raw": getattr(resp, "text", ""), "http_status": resp.status_code}
 
 
 def _mask_value(val: Optional[str]) -> str:
@@ -65,31 +80,13 @@ def _mask_value(val: Optional[str]) -> str:
 
 
 def _mask_payload(payload: Dict) -> Dict:
-    """Shallow mask for common sensitive fields before logging."""
     if not payload:
         return {}
     masked = dict(payload)
-    for k in ["phone", "billersCode", "email", "api-key", "Authorization"]:
+    for k in ["phone", "billersCode", "email", "secret-key", "public-key", "api-key"]:
         if k in masked:
             masked[k] = _mask_value(masked[k])
     return masked
-
-
-def _safe_json(resp: requests.Response) -> Dict:
-    """
-    Always return a dict and include http_status.
-    If the provider returns non-JSON (e.g., HTML for 401), wrap it as {"raw": "..."}.
-    """
-    try:
-        body = resp.json()
-        if isinstance(body, dict):
-            body.setdefault("http_status", resp.status_code)
-            return body
-        # JSON but not a dict (list/str/etc) → wrap it
-        return {"raw": body, "http_status": resp.status_code}
-    except Exception:
-        txt = getattr(resp, "text", "")
-        return {"raw": txt, "http_status": resp.status_code}
 
 
 def _request(
@@ -98,31 +95,28 @@ def _request(
     *,
     json: Optional[Dict] = None,
     params: Optional[Dict] = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: Tuple[int, int] = DEFAULT_TIMEOUT,
     retries: int = MAX_RETRIES,
     log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Tuple[int, Dict]:
     """
-    Minimal retry loop for transient network errors.
-    Never retries on HTTP 2xx/4xx/5xx to avoid duplicate provider charges.
-    Only retries on connection/timeouts (pre-flight).
+    Minimal retry loop for transient network errors only (connect/read timeouts).
+    Never retries on any HTTP response to avoid duplicate provider charges.
     """
     url = f"{VTPASS_BASE_URL}{path}"
     last_exc: Optional[Exception] = None
 
     for attempt in range(retries + 1):
         try:
-            resp = requests.request(
-                method,
-                url,
-                headers=vtpass_headers(),
+            resp = Session.request(
+                method=method,
+                url=url,
+                headers=_headers_for(method),
                 json=json,
                 params=params,
                 timeout=timeout,
             )
             parsed = _safe_json(resp)
-
-            # Log once per attempt (masked)
             if log_fn:
                 log_fn({
                     "service": "vtpass",
@@ -132,17 +126,15 @@ def _request(
                     "request": _mask_payload(json or params or {}),
                     "response": _mask_payload(parsed),
                 })
-
             return resp.status_code, parsed
 
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.ConnectTimeout,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError) as e:
             last_exc = e
             if attempt < retries:
-                time.sleep(0.8)  # brief backoff
+                time.sleep(0.8)
                 continue
-
-            # Final failure (network)
-            payload = json or params or {}
             parsed_err = {
                 "code": "999",
                 "response_description": "Network error",
@@ -154,44 +146,55 @@ def _request(
                     "service": "vtpass",
                     "endpoint": path,
                     "status_code": 0,
-                    "request_id": payload.get("request_id"),
-                    "request": _mask_payload(payload),
+                    "request_id": (json or params or {}).get("request_id"),
+                    "request": _mask_payload(json or params or {}),
                     "response": _mask_payload(parsed_err),
                 })
             return 0, parsed_err
 
-    # Should not reach here
     raise RuntimeError(f"Unexpected _request flow. Last error: {last_exc}")
 
 
-def map_provider_state(payload: Any) -> Tuple[str, bool]:
+def generate_request_id(prefix: str = "") -> str:
     """
-    Map VTpass provider 'code' to internal state.
-    - "000" => successful
-    - "099" and "016" => pending
-    - anything else => failed
-
-    Returns (state, ok). Accepts any payload type and defaults to failed on non-dict.
+    First 12 chars must be Lagos time YYYYMMDDHHMM (>=12 chars total).
+    Docs: Request ID Format.
     """
-    if not isinstance(payload, dict):
-        return "failed", False
+    now = datetime.utcnow() + timedelta(hours=1)  # Africa/Lagos (UTC+1)
+    base = now.strftime("%Y%m%d%H%M")
+    return f"{base}{uuid.uuid4().hex[:12].upper()}"
 
-    code = str(payload.get("code", "")).strip()
-    if code == "000":
-        return "successful", True
-    if code in {"099", "016"}:
-        return "pending", False
 
-    # If there's no 'code', fall back to http_status heuristics
-    http_status = str(payload.get("http_status", ""))
-    if http_status.startswith("2"):
-        # 2xx without code: be conservative
-        return "pending", False
-    return "failed", False
+# ============================================================================
+# Mapping helpers (strict per VTU docs)
+# ============================================================================
 
-# ------------------------------------------------------------------------------
+def _tx_dict(body: Dict) -> Dict:
+    return body.get("content", {}).get("transactions", {}) if isinstance(body, dict) else {}
+
+
+def strict_map_outcome(body: Dict) -> str:
+    """
+    Success only when: code == "000" AND transactions.status == "delivered".
+    Pending when: transactions.status == "pending" OR code in {"099","016"}.
+    Failed otherwise (incl. 027/028 etc.).
+    """
+    try:
+        code = str(body.get("code", "")).strip()
+        tx = _tx_dict(body)
+        tx_status = str(tx.get("status", "")).lower()
+        if code == "000" and tx_status == "delivered":
+            return "successful"
+        if tx_status == "pending" or code in {"099", "016"}:
+            return "pending"
+    except Exception:
+        pass
+    return "failed"
+
+
+# ============================================================================
 # Service IDs
-# ------------------------------------------------------------------------------
+# ============================================================================
 AIRTIME_SERVICE_IDS = {
     "mtn": "mtn",
     "glo": "glo",
@@ -206,38 +209,21 @@ DATA_SERVICE_IDS = {
     "9mobile": "9mobile-data",
 }
 
-# ------------------------------------------------------------------------------
+
+# ============================================================================
 # Public API
-# ------------------------------------------------------------------------------
+# ============================================================================
 def get_service_variations(service_id: str, *, log_fn: Optional[Callable[[Dict], None]] = None) -> Dict:
-    """
-    Fetch available plans/packages for a given service_id and normalize the response.
-    Always returns a dict with at least:
-      ok: bool
-      code: str
-      response_description: str
-      content: any (if provider returned it)
-      raw: full provider JSON
-      http_status: int
-      service_id: str
-    """
     status, body = _request(
         "GET",
         "/service-variations",
         params={"serviceID": service_id},
         log_fn=log_fn,
     )
-
-    # body is guaranteed to be a dict from _safe_json
     code = str(body.get("code", "")).strip() or str(status)
-    content = body.get("content")
-
-    variations = None
-    if isinstance(content, dict):
-        variations = content.get("variations")
-
-    ok = (status == 200) and (code == "000" or (isinstance(variations, list) and len(variations) > 0))
-
+    content = body.get("content") if isinstance(body, dict) else None
+    variations = content.get("variations") if isinstance(content, dict) else None
+    ok = (status == 200) and (code == "000" or (isinstance(variations, list) and variations))
     return {
         "ok": ok,
         "code": code,
@@ -252,35 +238,33 @@ def get_service_variations(service_id: str, *, log_fn: Optional[Callable[[Dict],
 def purchase_airtime(
     network: str,
     phone: str,
-    amount: float,
+    amount: float | int,
     *,
     request_id: Optional[str] = None,
     log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
-    """
-    Make an airtime purchase. Ensure you persist request_id (idempotency) before calling.
-    """
-    service_id = AIRTIME_SERVICE_IDS.get(network.lower())
+    service_id = AIRTIME_SERVICE_IDS.get((network or "").lower())
     if not service_id:
         return {"ok": False, "state": "failed", "message": f"Unsupported network: {network}", "http_status": 400}
 
-    rid = request_id or generate_request_id("AIRTIME")
+    rid = request_id or generate_request_id()
     payload = {
         "request_id": rid,
         "serviceID": service_id,
-        "amount": str(amount),
-        "phone": phone,
+        "amount": int(float(amount)),  # VTU: send numeric
+        "phone": str(phone),
     }
-    status, body = _request("POST", "/pay", json=payload, log_fn=log_fn)
-    # body is a dict; map defensively anyway
-    state, ok = map_provider_state(body)
+
+    status_code, body = _request("POST", "/pay", json=payload, log_fn=log_fn)
+    outcome = strict_map_outcome(body if isinstance(body, dict) else {})
+
     return {
-        "ok": ok,
-        "state": state,              # "successful" | "pending" | "failed"
+        "ok": outcome == "successful",
+        "state": outcome,                 # successful | pending | failed
         "provider": body,
         "request_id": rid,
-        "message": body.get("response_description") or "",
-        "http_status": status,
+        "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
+        "http_status": status_code,
     }
 
 
@@ -292,30 +276,29 @@ def purchase_data(
     request_id: Optional[str] = None,
     log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
-    """
-    Purchase data bundle. Persist request_id before calling for idempotency.
-    """
-    service_id = DATA_SERVICE_IDS.get(network.lower())
+    service_id = DATA_SERVICE_IDS.get((network or "").lower())
     if not service_id:
         return {"ok": False, "state": "failed", "message": f"Unsupported network: {network}", "http_status": 400}
 
-    rid = request_id or generate_request_id("DATA")
+    rid = request_id or generate_request_id()
     payload = {
         "request_id": rid,
         "serviceID": service_id,
-        "billersCode": phone,      # VTpass uses billersCode for the target line
+        "billersCode": str(phone),   # VTpass uses billersCode for target line
         "variation_code": variation_code,
-        "phone": phone,
+        "phone": str(phone),
     }
-    status, body = _request("POST", "/pay", json=payload, log_fn=log_fn)
-    state, ok = map_provider_state(body)
+
+    status_code, body = _request("POST", "/pay", json=payload, log_fn=log_fn)
+    outcome = strict_map_outcome(body if isinstance(body, dict) else {})
+
     return {
-        "ok": ok,
-        "state": state,             # "successful" | "pending" | "failed"
+        "ok": outcome == "successful",
+        "state": outcome,                 # successful | pending | failed
         "provider": body,
         "request_id": rid,
-        "message": body.get("response_description") or "",
-        "http_status": status,
+        "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
+        "http_status": status_code,
     }
 
 
@@ -324,21 +307,21 @@ def requery_status(
     *,
     log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
-    """
-    Re-query the status of a prior transaction (idempotent reconciliation).
-    """
-    status, body = _request(
-        "GET",
+    # VTpass requery is POST in the official docs
+    status_code, body = _request(
+        "POST",
         "/requery",
-        params={"request_id": request_id},
+        json={"request_id": request_id},
         log_fn=log_fn,
     )
-    state, ok = map_provider_state(body)
+
+    outcome = strict_map_outcome(body if isinstance(body, dict) else {})
+
     return {
-        "ok": ok,
-        "state": state,             # "successful" | "pending" | "failed"
+        "ok": outcome == "successful",
+        "state": outcome,                 # successful | pending | failed
         "provider": body,
         "request_id": request_id,
-        "message": body.get("response_description") or "",
-        "http_status": status,
+        "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
+        "http_status": status_code,
     }

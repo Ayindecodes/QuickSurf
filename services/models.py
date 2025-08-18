@@ -1,15 +1,23 @@
-# services/models.py
+from __future__ import annotations
+
 from django.db import models
 from django.core.validators import MinValueValidator, RegexValidator
 from django.utils import timezone
 from users.models import User
 
+# ---------------------------------------------------------------------------
+# Validators
+# ---------------------------------------------------------------------------
 PHONE_VALIDATOR = RegexValidator(
     regex=r"^\+?\d{7,15}$",
     message="Enter a valid phone number (7–15 digits, optional leading +).",
 )
 
+# ---------------------------------------------------------------------------
+# Choices
+# ---------------------------------------------------------------------------
 STATUS_CHOICES = [
+    ("initiated", "Initiated"),
     ("pending", "Pending"),
     ("successful", "Successful"),
     ("failed", "Failed"),
@@ -23,17 +31,31 @@ NETWORK_CHOICES = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Airtime
+# ---------------------------------------------------------------------------
 class AirtimeTransaction(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="airtime_txns")
     network = models.CharField(max_length=10, choices=NETWORK_CHOICES)
     phone = models.CharField(max_length=15, validators=[PHONE_VALIDATOR])
     amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(1)])
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="initiated")
     client_reference = models.CharField(max_length=100, unique=True, db_index=True)
 
-    # Optional provider metadata (helps reconciliation / admin)
-    provider_request_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    # Provider metadata
+    provider_request_id = models.CharField(
+        max_length=100, blank=True, null=True, db_index=True,
+        help_text="Provider-side request/reference id (e.g., VTpass request_id)",
+    )
+    provider_reference = models.CharField(
+        max_length=100, blank=True, null=True,
+        help_text="Provider transactionId or equivalent",
+    )
     provider_status = models.CharField(max_length=64, blank=True, null=True)
+
+    # Optional raw response for audit/debug
+    raw_response = models.JSONField(blank=True, null=True)
 
     timestamp = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
@@ -46,25 +68,37 @@ class AirtimeTransaction(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.user.email} | {self.network} | ₦{self.amount}"
+        return f"{self.user.email} | {self.network} | ₦{self.amount} | {self.status}"
 
 
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
 class DataTransaction(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="data_txns")
     network = models.CharField(max_length=10, choices=NETWORK_CHOICES)
     phone = models.CharField(max_length=15, validators=[PHONE_VALIDATOR])
     plan = models.CharField(max_length=50)  # e.g. 1GB, 2GB, etc
     amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(1)])
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
 
-    # You already had this:
-    external_id = models.CharField(max_length=100, blank=True, null=True)
-
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="initiated")
     client_reference = models.CharField(max_length=100, unique=True, db_index=True)
 
-    # Optional provider metadata (parallel to airtime)
-    provider_request_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    # Optional external mapping (kept from your previous model)
+    external_id = models.CharField(max_length=100, blank=True, null=True)
+
+    # Provider metadata
+    provider_request_id = models.CharField(
+        max_length=100, blank=True, null=True, db_index=True,
+        help_text="Provider-side request/reference id (e.g., VTpass request_id)",
+    )
+    provider_reference = models.CharField(
+        max_length=100, blank=True, null=True,
+        help_text="Provider transactionId or equivalent",
+    )
     provider_status = models.CharField(max_length=64, blank=True, null=True)
+
+    raw_response = models.JSONField(blank=True, null=True)
 
     timestamp = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
@@ -77,14 +111,15 @@ class DataTransaction(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.user.email} | {self.network} | {self.plan} | ₦{self.amount}"
+        return f"{self.user.email} | {self.network} | {self.plan} | ₦{self.amount} | {self.status}"
 
 
+# ---------------------------------------------------------------------------
+# Provider I/O log (for VTpass/Paystack etc.)
+# ---------------------------------------------------------------------------
 class ProviderLog(models.Model):
-    """
-    General provider I/O log. Kept backward-compatible with your fields,
-    and extended with optional fields used by the new vtpass helper + admin.
-    """
+    """General provider I/O log with masked payloads where possible."""
+
     SERVICE_CHOICES = [
         ("airtime", "Airtime"),
         ("data", "Data"),
@@ -95,21 +130,18 @@ class ProviderLog(models.Model):
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     service_type = models.CharField(max_length=10, choices=SERVICE_CHOICES, default="vtpass")
 
-    # Your existing correlation field:
+    # Correlation fields
     client_reference = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    request_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
 
-    # ➕ Optional: more correlation/diagnostics (non-breaking additions)
-    request_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)  # e.g. VTpass request_id
-    endpoint = models.CharField(max_length=128, blank=True, null=True)                   # e.g. "/pay", "/requery"
-    provider = models.CharField(max_length=32, blank=True, null=True)                    # e.g. "vtpass", "paystack"
+    endpoint = models.CharField(max_length=128, blank=True, null=True)
+    provider = models.CharField(max_length=32, blank=True, null=True)
     response_time_ms = models.IntegerField(blank=True, null=True)
     error_message = models.CharField(max_length=255, blank=True, null=True)
 
-    # Payloads (store masked if possible)
     request_payload = models.JSONField()
     response_payload = models.JSONField()
 
-    # Keep as CharField to avoid migration pain; store numeric strings like "200"
     status_code = models.CharField(max_length=10)
 
     timestamp = models.DateTimeField(auto_now_add=True)

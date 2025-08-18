@@ -1,6 +1,10 @@
+# payments/urls.py
 from django.urls import path
-from .views import paystack_webhook
+from .views import PaymentInitView, PaymentVerifyView, PaystackWebhookView
 
 urlpatterns = [
-    path("webhook/", paystack_webhook, name="paystack-webhook"),
+    path("init/", PaymentInitView.as_view(), name="payments_init"),
+    path("verify/<str:reference>/", PaymentVerifyView.as_view(), name="payments_verify"),
+    path("webhook/", PaystackWebhookView.as_view(), name="payments_webhook"),
 ]
+

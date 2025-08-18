@@ -1,4 +1,3 @@
-# quicksurf/settings.py
 from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
@@ -54,6 +53,7 @@ INSTALLED_APPS = [
     "payments",
     "rewards",
     "notifications",
+    "core",
 ]
 
 # -------------------------------------------------------------------
@@ -107,6 +107,28 @@ DATABASES = {
         ssl_require=config("DB_SSL_REQUIRE", default=True, cast=bool),
     )
 }
+
+# -------------------------------------------------------------------
+# Caches (for single-flight locks, rate limits, etc.)
+# -------------------------------------------------------------------
+REDIS_URL = config("REDIS_URL", default="")
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+            "OPTIONS": {"ssl_cert_reqs": None} if REDIS_URL.startswith("rediss://") else {},
+            "TIMEOUT": None,  # per-key TTLs still respected
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "quicksurf-locmem",
+            "TIMEOUT": None,
+        }
+    }
 
 # -------------------------------------------------------------------
 # Password Validators
@@ -180,7 +202,6 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.AnonRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        # keep conservative with live money ops
         "user": config("DRF_USER_THROTTLE", default="1000/day"),
         "anon": config("DRF_ANON_THROTTLE", default="100/day"),
     },
@@ -205,7 +226,7 @@ SPECTACULAR_SETTINGS = {
 # JWT
 # -------------------------------------------------------------------
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=config("JWT_ACCESS_MIN", default=60, cast=int)),
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=4),  # 4 hours
     "REFRESH_TOKEN_LIFETIME": timedelta(days=config("JWT_REFRESH_DAYS", default=1, cast=int)),
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
@@ -213,33 +234,31 @@ SIMPLE_JWT = {
 # -------------------------------------------------------------------
 # CORS / CSRF
 # -------------------------------------------------------------------
-# Strongly prefer explicit origins in production
 CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
     cast=Csv(),
     default="http://localhost:3000,http://127.0.0.1:3000",
 )
 CORS_ALLOW_CREDENTIALS = True
-
-# Only allow all origins in dev
 CORS_ALLOW_ALL_ORIGINS = config("CORS_ALLOW_ALL_ORIGINS", default=DEBUG, cast=bool)
 
 # -------------------------------------------------------------------
-# Security (good defaults for Render HTTPS)
+# Security (good defaults for HTTPS)
 # -------------------------------------------------------------------
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = config("SECURE_SSL_REDIRECT", default=(ENV == "production"), cast=bool)
 
 SESSION_COOKIE_SECURE = (ENV == "production")
 CSRF_COOKIE_SECURE = (ENV == "production")
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
 
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 
-# HSTS only in production (ensure HTTPS works first)
-SECURE_HSTS_SECONDS = 60 * 60 * 24 * 7 if ENV == "production" else 0  # 1 week to start
+SECURE_HSTS_SECONDS = 60 * 60 * 24 * 7 if ENV == "production" else 0
 SECURE_HSTS_INCLUDE_SUBDOMAINS = (ENV == "production")
-SECURE_HSTS_PRELOAD = False  # set True later once you are confident
+SECURE_HSTS_PRELOAD = False
 
 X_FRAME_OPTIONS = "DENY"
 REFERRER_POLICY = "same-origin"
@@ -254,8 +273,9 @@ ACCOUNT_LOGOUT_REDIRECT_URL = "/accounts/login/"
 # Providers config (read from .env)
 # -------------------------------------------------------------------
 PROVIDER_MODE = config("PROVIDER_MODE", default="LIVE")  # LIVE | MOCK
+
 # VTpass
-VTPASS_BASE_URL = config("VTPASS_BASE_URL", default="https://vtpass.com/api")  # set to real live base
+VTPASS_BASE_URL = config("VTPASS_BASE_URL", default="https://vtpass.com/api")
 VTPASS_EMAIL = config("VTPASS_EMAIL", default="")
 VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
@@ -269,28 +289,29 @@ PAYSTACK_BASE_URL = config("PAYSTACK_BASE_URL", default="https://api.paystack.co
 PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="")  # HMAC verification
 
 # -------------------------------------------------------------------
-# Logging (mask PII in your own log calls; avoid logging raw payloads)
+# Feature toggles (used by signals/emails)
+# -------------------------------------------------------------------
+POINTS_PER_NAIRA = config("POINTS_PER_NAIRA", default="0.01")
+REWARDS_ENABLED = config("REWARDS_ENABLED", default=True, cast=bool)
+RECEIPT_EMAILS_ENABLED = config("RECEIPT_EMAILS_ENABLED", default=True, cast=bool)
+
+# -------------------------------------------------------------------
+# Logging
 # -------------------------------------------------------------------
 LOG_LEVEL = "DEBUG" if DEBUG else "INFO"
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
-        "app": {
-            "format": "[{levelname}] {asctime} {name} — {message}",
-            "style": "{",
-        },
+        "app": {"format": "[{levelname}] {asctime} {name} — {message}", "style": "{"},
     },
     "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "app",
-        },
+        "console": {"class": "logging.StreamHandler", "formatter": "app"},
     },
     "root": {"handlers": ["console"], "level": LOG_LEVEL},
     "loggers": {
-        # quiet down noisy libs in prod if needed
         "django.db.backends": {"level": "WARNING" if not DEBUG else "INFO"},
         "django.request": {"level": "WARNING"},
     },
 }
+
