@@ -3,6 +3,7 @@ from datetime import timedelta
 from decouple import config, Csv
 import dj_database_url
 import os
+import logging  # NEW
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -13,11 +14,12 @@ ENV = config("ENV", default="development")  # "development" | "production" | "st
 DEBUG = config("DEBUG", default=(ENV != "production"), cast=bool)
 SECRET_KEY = config("SECRET_KEY")
 
-ALLOWED_HOSTS = config("ALLOWED_HOSTS", cast=Csv(), default="localhost,127.0.0.1")
+# include Render defaults in case env var not set
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", cast=Csv(), default="localhost,127.0.0.1,.onrender.com,quicksurf.onrender.com")
 CSRF_TRUSTED_ORIGINS = config(
     "CSRF_TRUSTED_ORIGINS",
     cast=Csv(),
-    default="http://localhost:3000,http://127.0.0.1:3000",
+    default="http://localhost:3000,http://127.0.0.1:3000,https://quicksurf.onrender.com",
 )
 
 SITE_ID = 1
@@ -237,7 +239,7 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
     cast=Csv(),
-    default="http://localhost:3000,http://127.0.0.1:3000",
+    default="http://localhost:3000,http://127.0.0.1:3000,https://quicksurf.onrender.com",
 )
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = config("CORS_ALLOW_ALL_ORIGINS", default=DEBUG, cast=bool)
@@ -272,10 +274,11 @@ ACCOUNT_LOGOUT_REDIRECT_URL = "/accounts/login/"
 # -------------------------------------------------------------------
 # Providers config (read from .env)
 # -------------------------------------------------------------------
-PROVIDER_MODE = config("PROVIDER_MODE", default="LIVE")  # LIVE | MOCK
+PROVIDER_MODE = config("PROVIDER_MODE", default="LIVE").upper()  # LIVE | MOCK
 
 # VTpass
-VTPASS_BASE_URL = config("VTPASS_BASE_URL", default="https://vtpass.com/api")
+# keep without trailing slash; code will append endpoints like /balance, /pay
+VTPASS_BASE_URL = config("VTPASS_BASE_URL", default="https://vtpass.com/api").rstrip("/")
 VTPASS_EMAIL = config("VTPASS_EMAIL", default="")
 VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
@@ -289,11 +292,14 @@ PAYSTACK_BASE_URL = config("PAYSTACK_BASE_URL", default="https://api.paystack.co
 PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="")  # HMAC verification
 
 # -------------------------------------------------------------------
-# Feature toggles (used by signals/emails)
+# Feature toggles
 # -------------------------------------------------------------------
 POINTS_PER_NAIRA = config("POINTS_PER_NAIRA", default="0.01")
 REWARDS_ENABLED = config("REWARDS_ENABLED", default=True, cast=bool)
 RECEIPT_EMAILS_ENABLED = config("RECEIPT_EMAILS_ENABLED", default=True, cast=bool)
+
+# >>> NEW: allow LIVE tests even if internal wallet is 0.00
+ALLOW_PROVIDER_DIRECT_CHARGE = config("ALLOW_PROVIDER_DIRECT_CHARGE", default=False, cast=bool)
 
 # -------------------------------------------------------------------
 # Logging
@@ -315,3 +321,6 @@ LOGGING = {
     },
 }
 
+# >>> NEW: print a clear boot line so you can verify LIVE mode in Render logs
+logger = logging.getLogger(__name__)
+logger.warning(f"BOOT ENV={ENV} DEBUG={DEBUG} PROVIDER_MODE={PROVIDER_MODE} VTPASS_BASE_URL={VTPASS_BASE_URL} DIRECT_CHARGE={ALLOW_PROVIDER_DIRECT_CHARGE}")
