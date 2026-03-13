@@ -12,7 +12,7 @@ from decouple import config
 # ============================================================================
 # Configuration (LIVE or MOCK/SANDBOX via env)
 # ============================================================================
-PROVIDER_MODE = config("PROVIDER_MODE", default="MOCK").upper()  # LIVE | MOCK
+PROVIDER_MODE = config("PROVIDER_MODE", default="LIVE").upper()  # LIVE | MOCK
 VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
 VTPASS_SECRET_KEY = config("VTPASS_SECRET_KEY", default="")
