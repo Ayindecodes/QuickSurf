@@ -40,7 +40,6 @@ INSTALLED_APPS = [
     # Third-party
     "allauth",
     "allauth.account",
-    "allauth.socialaccount",
     "rest_framework",
     "rest_framework.authtoken",
     "rest_framework_simplejwt",
