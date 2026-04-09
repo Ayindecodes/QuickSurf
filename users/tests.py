@@ -28,3 +28,20 @@ class AuthFlowTests(APITestCase):
         self.assertEqual(wallet.balance, 0)
         self.assertEqual(wallet.locked, 0)
         self.assertEqual(LoginActivity.objects.filter(user=user).count(), 1)
+
+    def test_login_returns_tokens_and_records_activity(self):
+        user = User.objects.create_user(email="login@example.com", password="StrongPass123")
+
+        response = self.client.post(
+            reverse("user-login"),
+            {
+                "email": "login@example.com",
+                "password": "StrongPass123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+        self.assertEqual(LoginActivity.objects.filter(user=user).count(), 1)

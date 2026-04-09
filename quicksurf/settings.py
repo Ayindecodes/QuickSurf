@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
+from django.core.exceptions import ImproperlyConfigured
 import dj_database_url
 import os
 import logging  # NEW
@@ -25,12 +26,33 @@ def env_bool(name: str, default: bool = False) -> bool:
         return False
     return default
 
+
+def normalize_env(value: str | None) -> str:
+    raw = (value or "development").strip().lower()
+    aliases = {
+        "prod": "production",
+        "production": "production",
+        "release": "production",
+        "stage": "staging",
+        "staging": "staging",
+        "dev": "development",
+        "development": "development",
+        "local": "development",
+    }
+    return aliases.get(raw, raw)
+
 # -------------------------------------------------------------------
 # Core / Environment
 # -------------------------------------------------------------------
-ENV = config("ENV", default="development")  # "development" | "production" | "staging"
-DEBUG = env_bool("DEBUG", default=(ENV != "production"))
-SECRET_KEY = config("SECRET_KEY")
+ENV = normalize_env(config("ENV", default="development"))  # development | staging | production
+IS_PRODUCTION = ENV == "production"
+DEBUG = env_bool("DEBUG", default=(not IS_PRODUCTION))
+
+SECRET_KEY = config("SECRET_KEY", default="")
+if not SECRET_KEY:
+    if IS_PRODUCTION:
+        raise ImproperlyConfigured("SECRET_KEY is required when ENV is production.")
+    SECRET_KEY = "dev-only-insecure-secret-key"
 
 # include Render defaults in case env var not set
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", cast=Csv(), default="localhost,127.0.0.1,.onrender.com,quicksurf.onrender.com")
@@ -123,7 +145,7 @@ DATABASES = {
     "default": dj_database_url.config(
         default=config("DATABASE_URL", default=f"sqlite:///{BASE_DIR/'db.sqlite3'}"),
         conn_max_age=600,
-        ssl_require=env_bool("DB_SSL_REQUIRE", default=True),
+        ssl_require=env_bool("DB_SSL_REQUIRE", default=IS_PRODUCTION),
     )
 }
 
@@ -265,18 +287,18 @@ CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
 # Security (good defaults for HTTPS)
 # -------------------------------------------------------------------
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", default=(ENV == "production"))
+SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", default=IS_PRODUCTION)
 
-SESSION_COOKIE_SECURE = (ENV == "production")
-CSRF_COOKIE_SECURE = (ENV == "production")
+SESSION_COOKIE_SECURE = IS_PRODUCTION
+CSRF_COOKIE_SECURE = IS_PRODUCTION
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
 
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 
-SECURE_HSTS_SECONDS = 60 * 60 * 24 * 7 if ENV == "production" else 0
-SECURE_HSTS_INCLUDE_SUBDOMAINS = (ENV == "production")
+SECURE_HSTS_SECONDS = 60 * 60 * 24 * 7 if IS_PRODUCTION else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = IS_PRODUCTION
 SECURE_HSTS_PRELOAD = False
 
 X_FRAME_OPTIONS = "DENY"
