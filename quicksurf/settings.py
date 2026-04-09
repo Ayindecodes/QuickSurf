@@ -7,11 +7,29 @@ import logging  # NEW
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """
+    Parse booleans safely, including common deployment values like "release".
+    """
+    raw = config(name, default=None)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "f", "no", "n", "off", "release", "prod", "production"}:
+        return False
+    return default
+
 # -------------------------------------------------------------------
 # Core / Environment
 # -------------------------------------------------------------------
 ENV = config("ENV", default="development")  # "development" | "production" | "staging"
-DEBUG = config("DEBUG", default=(ENV != "production"), cast=bool)
+DEBUG = env_bool("DEBUG", default=(ENV != "production"))
 SECRET_KEY = config("SECRET_KEY")
 
 # include Render defaults in case env var not set
@@ -105,7 +123,7 @@ DATABASES = {
     "default": dj_database_url.config(
         default=config("DATABASE_URL", default=f"sqlite:///{BASE_DIR/'db.sqlite3'}"),
         conn_max_age=600,
-        ssl_require=config("DB_SSL_REQUIRE", default=True, cast=bool),
+        ssl_require=env_bool("DB_SSL_REQUIRE", default=True),
     )
 }
 
@@ -241,13 +259,13 @@ CORS_ALLOWED_ORIGINS = config(
     default="http://localhost:3000,http://127.0.0.1:3000,https://quicksurf.onrender.com",
 )
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_ALL_ORIGINS = config("CORS_ALLOW_ALL_ORIGINS", default=DEBUG, cast=bool)
+CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
 
 # -------------------------------------------------------------------
 # Security (good defaults for HTTPS)
 # -------------------------------------------------------------------
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-SECURE_SSL_REDIRECT = config("SECURE_SSL_REDIRECT", default=(ENV == "production"), cast=bool)
+SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", default=(ENV == "production"))
 
 SESSION_COOKIE_SECURE = (ENV == "production")
 CSRF_COOKIE_SECURE = (ENV == "production")
@@ -282,7 +300,7 @@ VTPASS_EMAIL = config("VTPASS_EMAIL", default="")
 VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
 VTPASS_SECRET_KEY = config("VTPASS_SECRET_KEY", default="")
-VTPASS_IP_WHITELISTED = config("VTPASS_IP_WHITELISTED", default=False, cast=bool)
+VTPASS_IP_WHITELISTED = env_bool("VTPASS_IP_WHITELISTED", default=False)
 
 # Paystack (for wallet funding)
 PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
@@ -294,11 +312,11 @@ PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="")  # HMAC 
 # Feature toggles
 # -------------------------------------------------------------------
 POINTS_PER_NAIRA = config("POINTS_PER_NAIRA", default="0.01")
-REWARDS_ENABLED = config("REWARDS_ENABLED", default=True, cast=bool)
-RECEIPT_EMAILS_ENABLED = config("RECEIPT_EMAILS_ENABLED", default=True, cast=bool)
+REWARDS_ENABLED = env_bool("REWARDS_ENABLED", default=True)
+RECEIPT_EMAILS_ENABLED = env_bool("RECEIPT_EMAILS_ENABLED", default=True)
 
 # >>> NEW: allow LIVE tests even if internal wallet is 0.00
-ALLOW_PROVIDER_DIRECT_CHARGE = config("ALLOW_PROVIDER_DIRECT_CHARGE", default=False, cast=bool)
+ALLOW_PROVIDER_DIRECT_CHARGE = env_bool("ALLOW_PROVIDER_DIRECT_CHARGE", default=False)
 
 # -------------------------------------------------------------------
 # Logging
