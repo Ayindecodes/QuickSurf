@@ -77,8 +77,13 @@ def services_system_checks(app_configs, **kwargs):
     try:
         cache = caches["default"]
         backend_path = f"{cache.__class__.__module__}.{cache.__class__.__name__}"
-        if not settings.DEBUG and provider_mode == "LIVE":
-            if "django_redis" not in backend_path:
+        # Gate this warning on explicit production env instead of DEBUG, since
+        # some non-production deployments intentionally run with DEBUG=False.
+        is_production = str(getattr(settings, "ENV", "development")).lower() == "production"
+        if is_production and provider_mode == "LIVE":
+            backend_lower = backend_path.lower()
+            is_redis_backend = "redis" in backend_lower
+            if not is_redis_backend:
                 messages.append(
                     Warning(
                         "Non-Redis cache backend detected while in LIVE mode.",

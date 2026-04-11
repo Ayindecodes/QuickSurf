@@ -51,6 +51,32 @@ class PaymentFlowTests(APITestCase):
         self.assertEqual(self.wallet.balance, Decimal("1500.00"))
         self.assertEqual(intent.status, "success")
 
+    @patch("payments.views.ps_initialize", side_effect=Exception("provider timeout"))
+    def test_init_handles_provider_exception_and_marks_intent_failed(self, _mock_initialize):
+        url = reverse("payments_init")
+        resp = self.client.post(url, {"amount": "500.00"}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertIn("detail", resp.data)
+
+        intent = PaymentIntent.objects.get(user=self.user)
+        self.assertEqual(intent.status, "failed")
+        self.assertEqual((intent.init_response or {}).get("status"), False)
+
+    @patch("payments.views.ps_initialize")
+    def test_init_returns_502_when_provider_rejects_request(self, mock_initialize):
+        mock_initialize.return_value = (
+            400,
+            {"status": False, "message": "bad request"},
+        )
+
+        url = reverse("payments_init")
+        resp = self.client.post(url, {"amount": "500.00"}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        intent = PaymentIntent.objects.get(user=self.user)
+        self.assertEqual(intent.status, "failed")
+
     @patch("payments.views.valid_webhook", return_value=True)
     def test_webhook_credits_wallet_once_even_when_replayed(self, _mock_valid_webhook):
         intent = PaymentIntent.objects.create(

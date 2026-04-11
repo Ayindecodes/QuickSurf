@@ -15,8 +15,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
+from rest_framework import serializers as drf_serializers
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.types import OpenApiTypes
 
 from wallets.models import Wallet
 from .models import AirtimeTransaction, DataTransaction, ProviderLog
@@ -206,6 +208,12 @@ def _lock_key_ref(user_id, service, client_ref):
 
 def _lock_key_line(user_id, service, network, phone):
     return f"lock:{service}:line:{user_id}:{network}:{phone}"
+
+
+DetailSchema = inline_serializer(
+    name="ServiceDetailResponse",
+    fields={"detail": drf_serializers.CharField()},
+)
 
 
 # ===================== Airtime =====================
@@ -489,7 +497,10 @@ class DataPurchaseView(APIView):
 
 
 # ===================== Status Requery =====================
-@extend_schema(description="Re-query provider status and reconcile the transaction.")
+@extend_schema(
+    description="Re-query provider status and reconcile the transaction.",
+    responses={200: OpenApiTypes.OBJECT, 404: DetailSchema, 501: DetailSchema},
+)
 class PurchaseStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -542,7 +553,10 @@ class PurchaseStatusView(APIView):
 
 
 # ===================== Service Variations =====================
-@extend_schema(description="Get provider variations/plans for a given serviceID.")
+@extend_schema(
+    description="Get provider variations/plans for a given serviceID.",
+    responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT, 501: DetailSchema},
+)
 class ServiceVariationsView(APIView):
     permission_classes = [IsAuthenticated]
 

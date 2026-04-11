@@ -48,3 +48,16 @@ class WalletEndpointTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(self.wallet.locked, Decimal("0.00"))
+
+    def test_wallet_summary_returns_current_locked_value(self):
+        lock_response = self.client.post(
+            reverse("wallet-lock"),
+            {"amount": "500.00"},
+            format="json",
+        )
+        summary_response = self.client.get(reverse("wallet-summary"))
+
+        self.assertEqual(lock_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(summary_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary_response.data["balance"], "2000.00")
+        self.assertEqual(summary_response.data["locked"], "500.00")

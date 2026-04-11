@@ -299,7 +299,7 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 
 SECURE_HSTS_SECONDS = 60 * 60 * 24 * 7 if IS_PRODUCTION else 0
 SECURE_HSTS_INCLUDE_SUBDOMAINS = IS_PRODUCTION
-SECURE_HSTS_PRELOAD = False
+SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", default=False)
 
 X_FRAME_OPTIONS = "DENY"
 REFERRER_POLICY = "same-origin"
@@ -348,7 +348,7 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
-        "app": {"format": "[{levelname}] {asctime} {name} — {message}", "style": "{"},
+        "app": {"format": "[{levelname}] {asctime} {name} - {message}", "style": "{"},
     },
     "handlers": {
         "console": {"class": "logging.StreamHandler", "formatter": "app"},

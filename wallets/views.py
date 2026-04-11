@@ -61,7 +61,7 @@ class WalletSummaryView(APIView):
 
         return Response({
             "balance": str(wallet.balance),
-            "locked": str(getattr(wallet, "locked_amount", 0)),
+            "locked": str(wallet.locked),
             "recent_airtime": [{
                 "amount": str(t.amount),
                 "network": t.network,

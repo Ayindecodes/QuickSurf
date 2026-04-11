@@ -8,11 +8,13 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework import serializers as drf_serializers
+from drf_spectacular.utils import extend_schema, inline_serializer
 
 from wallets.models import Wallet
 from services.models import ProviderLog
 from .models import PaymentIntent
-from .serializers import PaymentInitRequestSerializer, PaymentIntentSerializer
+from .serializers import PaymentInitRequestSerializer
 from .paystack import initialize as ps_initialize, verify as ps_verify, valid_webhook
 
 # ---- helpers ----------------------------------------------------------------
@@ -49,10 +51,50 @@ def _credit_wallet_once(user, amount: Decimal, reference: str):
     return True
 
 # ---- endpoints ---------------------------------------------------------------
+PaymentInitResponseSchema = inline_serializer(
+    name="PaymentInitResponse",
+    fields={
+        "reference": drf_serializers.CharField(),
+        "authorization_url": drf_serializers.CharField(allow_blank=True, allow_null=True),
+        "status": drf_serializers.CharField(),
+    },
+)
+
+PaymentVerifyResponseSchema = inline_serializer(
+    name="PaymentVerifyResponse",
+    fields={
+        "reference": drf_serializers.CharField(),
+        "status": drf_serializers.CharField(),
+        "credited": drf_serializers.BooleanField(required=False),
+    },
+)
+
+WebhookAckSchema = inline_serializer(
+    name="PaystackWebhookAck",
+    fields={"ok": drf_serializers.BooleanField()},
+)
+
+WebhookRequestSchema = inline_serializer(
+    name="PaystackWebhookRequest",
+    fields={
+        "event": drf_serializers.CharField(required=False),
+        "data": drf_serializers.DictField(required=False),
+    },
+)
+
+DetailSchema = inline_serializer(
+    name="DetailResponse",
+    fields={"detail": drf_serializers.CharField()},
+)
 
 class PaymentInitView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        request=PaymentInitRequestSerializer,
+        responses={201: PaymentInitResponseSchema, 502: DetailSchema},
+        description="Initialize a Paystack top-up intent and return authorization URL.",
+    )
     def post(self, request):
         ser = PaymentInitRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
@@ -68,13 +110,21 @@ class PaymentInitView(APIView):
             status="initialized",
         )
 
-        code, body = ps_initialize(
-            email=(getattr(request.user, "email", None) or "user@example.com"),
-            amount_naira=amount,
-            reference=reference,
-            metadata=metadata,
-            callback_url=None,  # optionally set a frontend callback
-        )
+        try:
+            code, body = ps_initialize(
+                email=(getattr(request.user, "email", None) or "user@example.com"),
+                amount_naira=amount,
+                reference=reference,
+                metadata=metadata,
+                callback_url=None,  # optionally set a frontend callback
+            )
+        except Exception:
+            err_body = {"status": False, "message": "Provider initialize request failed"}
+            _log_provider(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, err_body, 502)
+            intent.init_response = err_body
+            intent.status = "failed"
+            intent.save(update_fields=["init_response", "status", "updated"])
+            return Response({"detail": "Payment provider unavailable. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
         _log_provider(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, body, code)
 
         # Defensive parse
@@ -82,8 +132,12 @@ class PaymentInitView(APIView):
         intent.authorization_url = data.get("authorization_url")
         intent.access_code = data.get("access_code")
         intent.init_response = body
-        intent.status = "pending" if code == 200 and body.get("status") else "pending"
+        initialized = code == 200 and bool((body or {}).get("status"))
+        intent.status = "pending" if initialized else "failed"
         intent.save(update_fields=["authorization_url", "access_code", "init_response", "status", "updated"])
+
+        if not initialized:
+            return Response({"detail": "Unable to initialize payment at this time."}, status=status.HTTP_502_BAD_GATEWAY)
 
         return Response({
             "reference": intent.reference,
@@ -94,13 +148,20 @@ class PaymentInitView(APIView):
 class PaymentVerifyView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        responses={200: PaymentVerifyResponseSchema, 404: DetailSchema, 502: DetailSchema},
+        description="Verify a Paystack top-up reference and credit wallet idempotently.",
+    )
     def get(self, request, reference: str):
         try:
             intent = PaymentIntent.objects.get(reference=reference, user=request.user)
         except PaymentIntent.DoesNotExist:
             return Response({"detail": "Unknown reference"}, status=404)
 
-        code, body = ps_verify(reference)
+        try:
+            code, body = ps_verify(reference)
+        except Exception:
+            return Response({"detail": "Payment verification unavailable. Please retry."}, status=status.HTTP_502_BAD_GATEWAY)
         _log_provider(request.user, reference, "/transaction/verify", None, body, code)
 
         intent.verify_response = body
@@ -134,6 +195,11 @@ class PaymentVerifyView(APIView):
 class PaystackWebhookView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        request=WebhookRequestSchema,
+        responses={200: WebhookAckSchema, 400: DetailSchema, 401: DetailSchema},
+        description="Handle signed Paystack webhooks. Endpoint is idempotent for repeated events.",
+    )
     def post(self, request):
         sig = request.headers.get("X-Paystack-Signature") or request.headers.get("x-paystack-signature")
         raw = request.body

@@ -3,9 +3,11 @@ from unittest.mock import patch
 
 from django.urls import reverse
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APITransactionTestCase
 
 from services.models import AirtimeTransaction, DataTransaction
+from rewards.models import LoyaltyLedger
+from notifications.models import EmailLog
 from users.models import User
 from wallets.models import Wallet
 
@@ -230,3 +232,49 @@ class DataPurchaseTests(APITestCase):
         self.assertEqual(txn.status, "failed")
         self.assertEqual(self.wallet.balance, Decimal("3000.00"))
         self.assertEqual(self.wallet.locked, Decimal("0.00"))
+
+
+class RewardAndReceiptSignalTests(APITransactionTestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="signals@example.com", password="StrongPass123")
+        self.wallet = Wallet.objects.get(user=self.user)
+        self.wallet.balance = Decimal("5000.00")
+        self.wallet.save(update_fields=["balance"])
+        self.client.force_authenticate(self.user)
+        self.url = reverse("airtime-purchase")
+
+    @patch("services.views.purchase_airtime")
+    def test_successful_airtime_creates_loyalty_entry_and_receipt_log_once(self, mock_purchase_airtime):
+        mock_purchase_airtime.return_value = {
+            "ok": True,
+            "provider": {
+                "code": "000",
+                "requestId": "VT-SIG-1",
+                "response_description": "Transaction successful",
+                "content": {
+                    "transactions": {
+                        "status": "delivered",
+                        "transactionId": "TX-SIG-1",
+                    }
+                },
+            },
+        }
+        payload = {
+            "amount": "1000.00",
+            "network": "mtn",
+            "phone": "08031234567",
+            "client_reference": "AIR-SIG-001",
+        }
+
+        first = self.client.post(self.url, payload, format="json")
+        second = self.client.post(self.url, payload, format="json")
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+
+        loyalty_entries = LoyaltyLedger.objects.filter(user=self.user, txn_type="airtime")
+        receipt_logs = EmailLog.objects.filter(to=self.user.email, subject__icontains="Airtime")
+
+        self.assertEqual(loyalty_entries.count(), 1)
+        self.assertEqual(loyalty_entries.first().points, 10)
+        self.assertEqual(receipt_logs.count(), 1)

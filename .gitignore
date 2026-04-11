@@ -1,5 +1,6 @@
 # Ignore env and secrets
 .env
+.env.production
 
 # Python cache
 __pycache__/
