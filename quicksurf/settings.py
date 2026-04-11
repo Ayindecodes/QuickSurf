@@ -239,8 +239,8 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.IsAuthenticated",
     ),
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.UserRateThrottle",
-        "rest_framework.throttling.AnonRateThrottle",
+        "core.throttling.SafeUserRateThrottle",
+        "core.throttling.SafeAnonRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "user": config("DRF_USER_THROTTLE", default="1000/day"),
