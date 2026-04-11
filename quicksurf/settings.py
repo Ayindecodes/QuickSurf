@@ -280,6 +280,17 @@ CORS_ALLOWED_ORIGINS = config(
     cast=Csv(),
     default="http://localhost:3000,http://127.0.0.1:3000,https://quicksurf.onrender.com",
 )
+# Optionally pin your active frontend origin in one place.
+FRONTEND_URL = config("FRONTEND_URL", default="").strip()
+if FRONTEND_URL:
+    if FRONTEND_URL not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS = [*CORS_ALLOWED_ORIGINS, FRONTEND_URL]
+    if FRONTEND_URL not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS = [*CSRF_TRUSTED_ORIGINS, FRONTEND_URL]
+
+# Helpful for Render preview/alias domains (https only).
+CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://.*\.onrender\.com$"]
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
 
