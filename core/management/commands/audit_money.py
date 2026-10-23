@@ -59,8 +59,8 @@ class Command(BaseCommand):
     def _wallet_mismatches(self):
         """
         A wallet's total (balance + locked) should equal Paystack top-ups credited + staff credits
-        + manual locks - manual unlocks - successful purchases. Pending purchases only move money
-        from balance to locked, and failed ones are refunded, so neither changes the total.
+        and adjustments + manual locks - manual unlocks - successful purchases. Pending purchases only
+        move money from balance to locked, and failed ones are refunded, so neither changes the total.
         """
         topups = _sum_by(PaymentIntent.objects.filter(status="success"), "user_id")
         spent = _sum_by(AirtimeTransaction.objects.filter(status="successful"), "user_id")
@@ -71,13 +71,17 @@ class Command(BaseCommand):
             pending[user_id] += amount
 
         ledger = defaultdict(lambda: defaultdict(lambda: ZERO))
-        for row in Transaction.objects.order_by().values("wallet_id", "type").annotate(total=Sum("amount")):
-            ledger[row["wallet_id"]][row["type"]] = row["total"] or ZERO
+        rows = Transaction.objects.order_by().values("wallet_id", "type").annotate(
+            total=Sum("amount"), delta=Sum("balance_delta"))
+        for row in rows:
+            # Adjustments go either way, so use their signed delta rather than the amount.
+            value = row["delta"] if row["type"] == Transaction.TYPE_ADJUSTMENT else row["total"]
+            ledger[row["wallet_id"]][row["type"]] = value or ZERO
 
         for wallet in Wallet.objects.select_related("user").order_by("id"):
             moves = ledger[wallet.id]
-            expected = (topups[wallet.user_id] + moves["credit"] + moves["lock"] - moves["unlock"]
-                        - spent[wallet.user_id])
+            expected = (topups[wallet.user_id] + moves["credit"] + moves["adjustment"] + moves["lock"]
+                        - moves["unlock"] - spent[wallet.user_id])
             actual = wallet.balance + wallet.locked
             if actual == expected:
                 continue
