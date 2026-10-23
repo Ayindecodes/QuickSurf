@@ -198,6 +198,31 @@ def _lock_key_line(user_id, service, network, phone):
     return f"lock:{service}:line:{user_id}:{network}:{phone}"
 
 
+def _acquire_purchase_locks(k_ref, k_line) -> bool:
+    """
+    Take the reference lock and the line cooldown, or neither. If the cache itself is down, carry
+    on without them: the database (unique reference, wallet row lock, one hold per purchase) still
+    stops double charges, and VTpass refuses repeats on a line within 30s (code 019).
+    """
+    try:
+        if not cache.add(k_ref, "1", LOCK_TTL):
+            return False
+        if not cache.add(k_line, "1", COOLDOWN_SEC):
+            cache.delete(k_ref)
+            return False
+        return True
+    except Exception:
+        logger.exception("Purchase locks unavailable (cache error); continuing without them")
+        return True
+
+
+def _release_purchase_locks(*keys):
+    try:
+        cache.delete_many(keys)
+    except Exception:
+        pass
+
+
 # ---------- Data plan pricing ----------
 class PlanPricingUnavailable(Exception):
     """VTpass's plan list couldn't be fetched or read, so the plan can't be priced safely."""
@@ -341,7 +366,7 @@ class AirtimePurchaseView(APIView):
         # Locks: (1) by client_ref, (2) by user+line for cooldown window
         k_ref = _lock_key_ref(user.id, "airtime", client_ref)
         k_line = _lock_key_line(user.id, "airtime", network, phone)
-        if not cache.add(k_ref, "1", LOCK_TTL) or not cache.add(k_line, "1", COOLDOWN_SEC):
+        if not _acquire_purchase_locks(k_ref, k_line):
             return Response({"detail": "Another purchase is in progress for this reference/line."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
         try:
@@ -419,8 +444,7 @@ class AirtimePurchaseView(APIView):
                 pass
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
         finally:
-            cache.delete(k_ref)
-            cache.delete(k_line)
+            _release_purchase_locks(k_ref, k_line)
 
 
 # ===================== Data =====================
@@ -456,7 +480,7 @@ class DataPurchaseView(APIView):
 
         k_ref = _lock_key_ref(user.id, "data", client_ref)
         k_line = _lock_key_line(user.id, "data", network, phone)
-        if not cache.add(k_ref, "1", LOCK_TTL) or not cache.add(k_line, "1", COOLDOWN_SEC):
+        if not _acquire_purchase_locks(k_ref, k_line):
             return Response({"detail": "Another purchase is in progress for this reference/line."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
         try:
@@ -543,8 +567,7 @@ class DataPurchaseView(APIView):
                 pass
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
         finally:
-            cache.delete(k_ref)
-            cache.delete(k_line)
+            _release_purchase_locks(k_ref, k_line)
 
 
 # ===================== Status Requery =====================
