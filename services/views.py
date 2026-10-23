@@ -229,15 +229,15 @@ def _sell_price(vtpass_price: Decimal) -> Decimal:
     return (vtpass_price * (1 + markup / 100)).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
 
 
-def _data_plan_price(network: str, variation_code: str) -> Decimal | None:
+def _data_plan(network: str, variation_code: str) -> tuple[Decimal, str] | None:
     """
-    QuickSurf's price for a data plan, from VTpass's live plan list. Not cached: VTpass bills by
-    variation_code, so this, not the client's amount, is what the wallet must be charged.
+    QuickSurf's price and the name of a data plan, from VTpass's live plan list. Not cached: VTpass
+    bills by variation_code, so this price, not the client's amount, is what the wallet must be charged.
     Returns None when the plan doesn't exist for the network.
     """
     for plan in _vtpass_plans(network):
         if plan["code"] == variation_code:
-            return _sell_price(plan["vtpass_price"])
+            return _sell_price(plan["vtpass_price"]), plan["name"]
     return None
 
 
@@ -532,7 +532,7 @@ class DataPurchaseView(APIView):
 
             # Price comes from VTpass, never from the client; a client amount only confirms the price shown.
             try:
-                amt = _data_plan_price(network, plan)
+                priced = _data_plan(network, plan)
             except PlanPricingUnavailable:
                 return Response(
                     {
@@ -541,11 +541,12 @@ class DataPurchaseView(APIView):
                     },
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
-            if amt is None:
+            if priced is None:
                 return Response(
                     {"error": f"Unknown data plan '{plan}' for {network}.", "code": "unknown_plan"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            amt, plan_name = priced
             if requested_amt is not None and Decimal(str(requested_amt)) != amt:
                 return Response(
                     {
@@ -580,6 +581,7 @@ class DataPurchaseView(APIView):
                     network=network,
                     phone=phone,
                     plan=plan,
+                    plan_name=plan_name[:120],
                     status="pending",
                     client_reference=client_ref,
                     provider_request_id=generate_request_id(),  # the ID VTpass knows it by (requery, callbacks)
@@ -766,7 +768,7 @@ class ReceiptView(APIView):
             {
                 "reference": txn.client_reference,
                 "date": txn.timestamp,
-                "item": f"Data {txn.plan}" if is_data else "Airtime",
+                "item": txn.item if is_data else "Airtime",
                 "network": txn.network,
                 "phone": txn.phone,
                 "amount": str(txn.amount),

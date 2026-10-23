@@ -106,6 +106,7 @@ class DataTransactionSerializer(serializers.ModelSerializer):
             "network",
             "phone",
             "plan",
+            "plan_name",
             "amount",
             "status",
             "client_reference",
