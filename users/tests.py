@@ -21,8 +21,13 @@ from wallets import services as wallet_services
 from wallets.models import Wallet
 
 STRONG = "Tropical-Lantern-42"
-DELIVERED = {"provider": {"code": "000", "response_description": "TRANSACTION SUCCESSFUL",
-                          "content": {"transactions": {"status": "delivered", "phone": "08031234567"}}}}
+DELIVERED = {
+    "provider": {
+        "code": "000",
+        "response_description": "TRANSACTION SUCCESSFUL",
+        "content": {"transactions": {"status": "delivered", "phone": "08031234567"}},
+    }
+}
 
 
 def _emailed_code():
@@ -39,8 +44,9 @@ class AuthTestCase(APITestCase):
 
 class AuthFlowTests(AuthTestCase):
     def test_register_returns_tokens_creates_wallet_and_emails_a_code(self):
-        response = self.client.post(reverse("user-register"), {"email": "Tester@Example.com", "password": STRONG},
-                                    format="json")
+        response = self.client.post(
+            reverse("user-register"), {"email": "Tester@Example.com", "password": STRONG}, format="json"
+        )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIn("access", response.data)
@@ -60,8 +66,9 @@ class AuthFlowTests(AuthTestCase):
     def test_register_rejects_weak_passwords(self):
         for weak in ("password", "12345678", "short1"):
             with self.subTest(password=weak):
-                response = self.client.post(reverse("user-register"), {"email": "weak@example.com", "password": weak},
-                                            format="json")
+                response = self.client.post(
+                    reverse("user-register"), {"email": "weak@example.com", "password": weak}, format="json"
+                )
                 self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
                 self.assertIn("password", response.data)
         self.assertFalse(User.objects.filter(email="weak@example.com").exists())
@@ -69,8 +76,9 @@ class AuthFlowTests(AuthTestCase):
     def test_register_rejects_an_email_that_differs_only_in_case(self):
         User.objects.create_user(email="dup@example.com", password=STRONG)
 
-        response = self.client.post(reverse("user-register"), {"email": "DUP@example.com", "password": STRONG},
-                                    format="json")
+        response = self.client.post(
+            reverse("user-register"), {"email": "DUP@example.com", "password": STRONG}, format="json"
+        )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("email", response.data)
@@ -89,8 +97,9 @@ class AuthFlowTests(AuthTestCase):
         User.objects.create_user(email="case@example.com", password=STRONG)
 
         self.assertEqual(self._login("CASE@Example.com").status_code, status.HTTP_200_OK)
-        token = self.client.post(reverse("token_obtain_pair"), {"email": "Case@EXAMPLE.com", "password": STRONG},
-                                 format="json")
+        token = self.client.post(
+            reverse("token_obtain_pair"), {"email": "Case@EXAMPLE.com", "password": STRONG}, format="json"
+        )
         self.assertEqual(token.status_code, status.HTTP_200_OK)
 
     def test_login_attempts_are_limited_per_email(self):
@@ -166,8 +175,9 @@ class EmailVerificationTests(AuthTestCase):
 
     def test_codes_expire_and_cannot_be_resent_within_a_minute(self):
         self.assertEqual(self.client.post(reverse("verify-email-request")).status_code, status.HTTP_200_OK)
-        self.assertEqual(self.client.post(reverse("verify-email-request")).status_code,
-                         status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(
+            self.client.post(reverse("verify-email-request")).status_code, status.HTTP_429_TOO_MANY_REQUESTS
+        )
         code = _emailed_code()
         OneTimeCode.objects.update(expires_at=timezone.now() - timedelta(minutes=1))
 
@@ -179,8 +189,9 @@ class EmailVerificationTests(AuthTestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["code"], "email_unverified")
 
-        importlib.import_module("users.migrations.0003_existing_users_verified") \
-            .treat_existing_users_as_verified(apps, None)
+        importlib.import_module("users.migrations.0003_existing_users_verified").treat_existing_users_as_verified(
+            apps, None
+        )
         self.user.refresh_from_db()
         self.assertTrue(self.user.email_verified)
 
@@ -194,8 +205,11 @@ class PasswordResetTests(AuthTestCase):
         return self.client.post(reverse("password-reset-request"), {"email": email}, format="json")
 
     def _confirm(self, code, new_password="Another-Strong-Phrase-77"):
-        return self.client.post(reverse("password-reset-confirm"),
-                                {"email": "reset@example.com", "code": code, "new_password": new_password}, format="json")
+        return self.client.post(
+            reverse("password-reset-confirm"),
+            {"email": "reset@example.com", "code": code, "new_password": new_password},
+            format="json",
+        )
 
     def test_reset_with_the_emailed_code_changes_the_password_and_signs_out_everywhere(self):
         old_refresh = self._login("reset@example.com").data["refresh"]
@@ -247,8 +261,13 @@ class TransactionPinTests(AuthTestCase):
         with patch("services.views.purchase_airtime", return_value=DELIVERED):
             return self.client.post(
                 reverse("airtime-purchase"),
-                {"amount": "300", "network": "mtn", "phone": "08031234567", "client_reference": client_reference,
-                 "pin": pin},
+                {
+                    "amount": "300",
+                    "network": "mtn",
+                    "phone": "08031234567",
+                    "client_reference": client_reference,
+                    "pin": pin,
+                },
                 format="json",
             )
 

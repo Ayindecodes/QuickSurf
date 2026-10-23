@@ -17,10 +17,15 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
-        parser.add_argument("--min-age-mins", type=int, default=10,
-                            help="Only check top-ups older than N minutes (default: 10)")
-        parser.add_argument("--abandon-after-hours", type=int, default=24,
-                            help="Mark top-ups still unpaid after N hours as abandoned (default: 24)")
+        parser.add_argument(
+            "--min-age-mins", type=int, default=10, help="Only check top-ups older than N minutes (default: 10)"
+        )
+        parser.add_argument(
+            "--abandon-after-hours",
+            type=int,
+            default=24,
+            help="Mark top-ups still unpaid after N hours as abandoned (default: 24)",
+        )
         parser.add_argument("--max", type=int, default=200, help="Max top-ups to check (default: 200)")
 
     def handle(self, *args, **opts):
@@ -42,7 +47,9 @@ class Command(BaseCommand):
                 continue
 
             body = trim_payload(body)
-            log_paystack(intent.user, intent.reference, "/transaction/verify", {"source": "verify_pending_topups"}, body, code)
+            log_paystack(
+                intent.user, intent.reference, "/transaction/verify", {"source": "verify_pending_topups"}, body, code
+            )
             result, credited = apply_verification(intent, code, body)
             if result == "pending" and intent.created < abandon_before:
                 set_status_unless_final(intent, "abandoned")

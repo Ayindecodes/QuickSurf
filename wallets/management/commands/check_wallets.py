@@ -15,7 +15,8 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         sums = {
             row["wallet_id"]: row
-            for row in Transaction.objects.order_by().values("wallet_id")
+            for row in Transaction.objects.order_by()
+            .values("wallet_id")
             .annotate(balance=Sum("balance_delta"), locked=Sum("locked_delta"))
         }
 

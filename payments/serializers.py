@@ -15,12 +15,21 @@ class PaymentInitRequestSerializer(serializers.Serializer):
             raise serializers.ValidationError("Minimum top-up is ₦100.")
         return v
 
+
 class PaymentIntentSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentIntent
         fields = [
-            "id", "user", "amount", "currency", "reference", "status",
-            "authorization_url", "access_code", "paid_at",
-            "created", "updated",
+            "id",
+            "user",
+            "amount",
+            "currency",
+            "reference",
+            "status",
+            "authorization_url",
+            "access_code",
+            "paid_at",
+            "created",
+            "updated",
         ]
         read_only_fields = fields

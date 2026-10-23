@@ -66,6 +66,7 @@ DetailSchema = inline_serializer(
     fields={"detail": drf_serializers.CharField()},
 )
 
+
 class PaymentInitView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = [SafeUserRateThrottle, SafeAnonRateThrottle, TopupRateThrottle]
@@ -115,7 +116,9 @@ class PaymentInitView(APIView):
             intent.init_response = err_body
             intent.status = "failed"
             intent.save(update_fields=["init_response", "status", "updated"])
-            return Response({"detail": "Payment provider unavailable. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"detail": "Payment provider unavailable. Please try again."}, status=status.HTTP_502_BAD_GATEWAY
+            )
         log_paystack(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, body, code)
 
         # Defensive parse
@@ -128,13 +131,19 @@ class PaymentInitView(APIView):
         intent.save(update_fields=["authorization_url", "access_code", "init_response", "status", "updated"])
 
         if not initialized:
-            return Response({"detail": "Unable to initialize payment at this time."}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"detail": "Unable to initialize payment at this time."}, status=status.HTTP_502_BAD_GATEWAY
+            )
 
-        return Response({
-            "reference": intent.reference,
-            "authorization_url": intent.authorization_url,
-            "status": intent.status,
-        }, status=status.HTTP_201_CREATED)
+        return Response(
+            {
+                "reference": intent.reference,
+                "authorization_url": intent.authorization_url,
+                "status": intent.status,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
 
 class PaymentVerifyView(APIView):
     permission_classes = [IsAuthenticated]
@@ -160,7 +169,9 @@ class PaymentVerifyView(APIView):
         try:
             code, body = ps_verify(reference)
         except Exception:
-            return Response({"detail": "Payment verification unavailable. Please retry."}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"detail": "Payment verification unavailable. Please retry."}, status=status.HTTP_502_BAD_GATEWAY
+            )
         body = trim_payload(body)
         log_paystack(request.user, reference, "/transaction/verify", None, body, code)
 
@@ -172,6 +183,7 @@ class PaymentVerifyView(APIView):
         if result == "success":
             response["credited"] = credited
         return Response(response)
+
 
 @method_decorator(csrf_exempt, name="dispatch")
 class PaystackWebhookView(APIView):
@@ -208,7 +220,7 @@ class PaystackWebhookView(APIView):
 
         # Attach webhook (append behaviour)
         try:
-            events = (intent.webhook_events or [])
+            events = intent.webhook_events or []
             events.append(stored)
             intent.webhook_events = events
             intent.save(update_fields=["webhook_events", "updated"])

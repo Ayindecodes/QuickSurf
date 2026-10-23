@@ -8,4 +8,3 @@ urlpatterns = [
     path("verify/<str:reference>/", PaymentVerifyView.as_view(), name="payments_verify"),
     path("webhook/", PaystackWebhookView.as_view(), name="payments_webhook"),
 ]
-

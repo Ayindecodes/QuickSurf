@@ -68,6 +68,7 @@ class PinSerializer(serializers.Serializer):
 
 # ---- Schemas for Swagger docs ----
 
+
 class LoginRequestSchema(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField()

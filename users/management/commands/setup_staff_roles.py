@@ -3,14 +3,20 @@ from django.contrib.auth.models import Group, Permission
 from django.core.management.base import BaseCommand
 
 VIEWABLE = [
-    ("users", "user"), ("wallets", "wallet"), ("wallets", "transaction"), ("payments", "paymentintent"),
-    ("services", "airtimetransaction"), ("services", "datatransaction"), ("services", "providerlog"),
-    ("notifications", "emaillog"), ("rewards", "loyaltyledger"),
+    ("users", "user"),
+    ("wallets", "wallet"),
+    ("wallets", "transaction"),
+    ("payments", "paymentintent"),
+    ("services", "airtimetransaction"),
+    ("services", "datatransaction"),
+    ("services", "providerlog"),
+    ("notifications", "emaillog"),
+    ("rewards", "loyaltyledger"),
 ]
 SUPPORT = [f"{app}.view_{model}" for app, model in VIEWABLE]
 ROLES = {
-    "Support": SUPPORT,                                # look things up, re-query VTpass / Paystack
-    "Finance": [*SUPPORT, "wallets.adjust_wallet"],    # ... and correct wallet balances
+    "Support": SUPPORT,  # look things up, re-query VTpass / Paystack
+    "Finance": [*SUPPORT, "wallets.adjust_wallet"],  # ... and correct wallet balances
 }
 
 

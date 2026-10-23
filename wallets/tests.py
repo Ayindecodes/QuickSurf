@@ -131,8 +131,7 @@ class WalletConcurrencyTests(TransactionTestCase):
         _check_wallets()
 
     def test_concurrent_credits_for_one_payment_credit_it_once(self):
-        results = self._in_parallel(
-            lambda i: wallet_services.credit_topup(self.user, Decimal("500.00"), "PAY-RACE-1"))
+        results = self._in_parallel(lambda i: wallet_services.credit_topup(self.user, Decimal("500.00"), "PAY-RACE-1"))
 
         self.assertEqual(results.count(True), 1)
         self.assertEqual(Wallet.objects.get(user=self.user).balance, Decimal("1500.00"))
@@ -143,8 +142,14 @@ class LedgerOpeningMigrationTests(TestCase):
     def test_opening_rows_match_current_balances_and_keep_pending_purchases_settleable(self):
         user = User.objects.create_user(email="old@example.com", password="StrongPass123")
         Wallet.objects.filter(user=user).update(balance=Decimal("700.00"), locked=Decimal("300.00"))
-        AirtimeTransaction.objects.create(user=user, network="mtn", phone="08031234567", amount=Decimal("300.00"),
-                                          status="pending", client_reference="AIR-OLD-1")
+        AirtimeTransaction.objects.create(
+            user=user,
+            network="mtn",
+            phone="08031234567",
+            amount=Decimal("300.00"),
+            status="pending",
+            client_reference="AIR-OLD-1",
+        )
 
         migration = importlib.import_module("wallets.migrations.0004_ledger_opening_balances")
         migration.open_ledger(apps, None)
@@ -162,8 +167,14 @@ class LedgerOpeningMigrationTests(TestCase):
         # The old lock endpoint added 200 to locked without taking it from balance.
         user = User.objects.create_user(email="stale@example.com", password="StrongPass123")
         Wallet.objects.filter(user=user).update(balance=Decimal("70.00"), locked=Decimal("230.00"))
-        AirtimeTransaction.objects.create(user=user, network="mtn", phone="08031234567", amount=Decimal("30.00"),
-                                          status="pending", client_reference="AIR-OLD-2")
+        AirtimeTransaction.objects.create(
+            user=user,
+            network="mtn",
+            phone="08031234567",
+            amount=Decimal("30.00"),
+            status="pending",
+            client_reference="AIR-OLD-2",
+        )
         importlib.import_module("wallets.migrations.0004_ledger_opening_balances").open_ledger(apps, None)
 
         listing = io.StringIO()
