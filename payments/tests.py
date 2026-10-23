@@ -41,7 +41,8 @@ def _charge_success(reference, amount_kobo, currency="NGN"):
 
 class PaymentTestCase(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(email="pay@example.com", password="StrongPass123")
+        self.user = User.objects.create_user(email="pay@example.com", password="StrongPass123",
+                                             email_verified_at=timezone.now())
         self.wallet = Wallet.objects.get(user=self.user)
         self.client.force_authenticate(self.user)
 

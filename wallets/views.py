@@ -1,6 +1,6 @@
 # wallets/views.py
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -111,16 +111,25 @@ class TransactionListView(APIView):
         return paginator.get_paginated_response(serializer.data)
 
 
+class CanAdjustWallets(BasePermission):
+    """Only staff given the wallets.adjust_wallet permission (the Finance role) can change balances."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and user.is_staff and user.has_perm("wallets.adjust_wallet"))
+
+
 @extend_schema(
     description=(
-        "Staff-only correction to a user's wallet. A positive amount adds to the balance, a negative "
-        "one takes from it. A note explaining why is required and is kept on the ledger entry."
+        "Staff-only correction to a user's wallet (needs the wallets.adjust_wallet permission). A positive "
+        "amount adds to the balance, a negative one takes from it. A note explaining why is required and "
+        "is kept on the ledger entry."
     ),
     request=AdjustmentSerializer,
     responses={201: TransactionSerializer, 400: OpenApiResponse(description="Validation error")},
 )
 class AdjustView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [CanAdjustWallets]
 
     def post(self, request):
         serializer = AdjustmentSerializer(data=request.data)

@@ -11,6 +11,7 @@ from rest_framework import status
 from rest_framework import serializers as drf_serializers
 from drf_spectacular.utils import extend_schema, inline_serializer
 
+from core.throttling import SafeAnonRateThrottle, SafeUserRateThrottle, TopupRateThrottle
 from .models import PaymentIntent
 from .serializers import PaymentInitRequestSerializer
 from .paystack import initialize as ps_initialize, verify as ps_verify, valid_webhook
@@ -63,6 +64,7 @@ DetailSchema = inline_serializer(
 
 class PaymentInitView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = [SafeUserRateThrottle, SafeAnonRateThrottle, TopupRateThrottle]
 
     @extend_schema(
         request=PaymentInitRequestSerializer,
@@ -74,6 +76,11 @@ class PaymentInitView(APIView):
             return Response(
                 {"detail": "Top-ups are temporarily unavailable. Please try again later."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if not request.user.email_verified:
+            return Response(
+                {"detail": "Verify your email before topping up.", "code": "email_unverified"},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         ser = PaymentInitRequestSerializer(data=request.data)

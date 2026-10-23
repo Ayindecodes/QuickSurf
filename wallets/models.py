@@ -108,6 +108,7 @@ class Transaction(models.Model):
             models.Index(fields=["reference"]),
         ]
         ordering = ["-timestamp", "-id"]
+        permissions = [("adjust_wallet", "Can adjust wallet balances")]
         constraints = [
             # A Paystack reference is credited once; a purchase is held, captured, released or reversed once.
             models.UniqueConstraint(

@@ -1,10 +1,12 @@
 import os
 
+from allauth.account.decorators import secure_admin_login
+from django.conf import settings
 from django.contrib import admin
 from django.core.cache import cache
 from django.db import connection
 from django.urls import path, include
-from django.http import JsonResponse, HttpResponse
+from django.http import JsonResponse
 
 # JWT Auth (custom obtain that logs IP/UA/device)
 from rest_framework_simplejwt.views import TokenRefreshView
@@ -41,11 +43,14 @@ def health_view(_request):
     )
 
 
-urlpatterns = [
-    # --- Admin ---
-    path("admin/", admin.site.urls),
+# Staff sign in to the admin through allauth, which asks for their authenticator code.
+admin.site.login = secure_admin_login(admin.site.login)
 
-    # --- Allauth (email verification / social login) ---
+urlpatterns = [
+    # --- Admin (path set by ADMIN_URL) ---
+    path(settings.ADMIN_URL, admin.site.urls),
+
+    # --- Allauth: staff sign-in and 2FA setup for the admin (public signup is closed) ---
     path("accounts/", include("allauth.urls")),
 
     # --- JWT Authentication ---
@@ -64,7 +69,6 @@ urlpatterns = [
 
     # --- Health ---
     path("api/health/", health_view, name="health"),
-    path("dashboard/", lambda request: HttpResponse("🎉 Welcome to your dashboard!")),
 
     # --- API Schema + Docs ---
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),

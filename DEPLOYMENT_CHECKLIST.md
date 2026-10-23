@@ -14,6 +14,10 @@ The app refuses to start if any of these are missing or unsafe:
 Also set:
 - `DEBUG=False`, `DB_SSL_REQUIRE=True`
 - `REDIS_URL`: purchase locks and rate limits are per-process without it
+- `SECRET_KEY` of at least 50 random characters (production refuses shorter)
+- SMTP (`EMAIL_HOST`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`): verification and reset codes are emailed
+- `ADMIN_URL`: something unguessable. `STAFF_MFA_REQUIRED` is on by default in production.
+- `TRANSACTION_PIN_REQUIRED=False` **only** if the live frontend has no PIN screen yet
 
 Then run `python manage.py check --deploy`.
 
@@ -29,7 +33,11 @@ Then run `python manage.py check --deploy`.
   - Paystack webhook → `https://<host>/api/payments/webhook/`
   - VTpass callback → `https://<host>/api/services/vtpass/callback/`
 
-## 4) Live endpoint smoke tests
+## 4) One-time setup
+- `python manage.py setup_staff_roles`, then put staff in the Support or Finance group.
+- Each staff member signs in at `/<ADMIN_URL>` and sets up an authenticator app.
+
+## 5) Live endpoint smoke tests
 - Health:
   - `GET /api/health/` -> expect `200` with `"database": "ok"` and `"cache": "ok"`
 - Auth:
@@ -47,7 +55,7 @@ Then run `python manage.py check --deploy`.
   - `GET /api/payments/verify/{reference}/` -> expect JSON status
   - Trigger a Paystack webhook -> expect `200` and the wallet credited once only
 
-## 5) Post-deploy verification
+## 6) Post-deploy verification
 - Confirm the logs show `BOOT ENV=production` and `PROVIDER_MODE=LIVE`.
 - Run `python manage.py check_wallets` -> expect every wallet to match its ledger.
 - Run `python manage.py vtpass_balance` -> expect the VTpass wallet balance.

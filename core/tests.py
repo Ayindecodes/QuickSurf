@@ -6,10 +6,19 @@ import sys
 from decimal import Decimal
 from unittest.mock import patch
 
-from django.conf import settings
-from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase, override_settings
+from datetime import timedelta
 
+from allauth.mfa.models import Authenticator
+from django.conf import settings
+from django.contrib.auth.models import Group
+from django.core.management import call_command
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+from rest_framework.test import APITestCase
+
+from core.net import client_ip
+from core.privacy import mask_pii
 from payments.models import PaymentIntent
 from services.models import AirtimeTransaction, DataTransaction, ProviderLog
 from users.models import User
@@ -167,6 +176,96 @@ class ProductionSettingsTests(SimpleTestCase):
         result = self._boot(VTPASS_BASE_URL="https://sandbox.vtpass.com/api")
         self.assertIn("points at the VTpass sandbox", result.stderr)
 
+    def test_refuses_a_short_secret_key(self):
+        result = self._boot(SECRET_KEY="too-short")
+        self.assertIn("SECRET_KEY must be at least 50 characters", result.stderr)
+
     def test_refuses_to_start_without_a_database_url(self):
         result = self._boot(DATABASE_URL="")
         self.assertIn("DATABASE_URL is required", result.stderr)
+
+
+PLAIN_STATIC = {"default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+                "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}
+
+
+class RequestSafetyTests(APITestCase):
+    def test_client_ip_trusts_cloudflare_not_x_forwarded_for(self):
+        factory = RequestFactory()
+        spoofed = factory.get("/", HTTP_X_FORWARDED_FOR="1.2.3.4", REMOTE_ADDR="10.0.0.1")
+        via_cloudflare = factory.get("/", HTTP_CF_CONNECTING_IP="41.58.1.2", HTTP_X_FORWARDED_FOR="1.2.3.4")
+
+        self.assertEqual(client_ip(spoofed), "10.0.0.1")
+        self.assertEqual(client_ip(via_cloudflare), "41.58.1.2")
+
+    def test_unexpected_errors_return_json_without_internal_details(self):
+        self.client.force_authenticate(User.objects.create_user(email="err@example.com", password="Pass-Phrase-9"))
+
+        with patch("wallets.views.Wallet.objects.get", side_effect=RuntimeError("db password is hunter2")), \
+             self.assertLogs("core.exceptions", level="ERROR"):
+            response = self.client.get(reverse("wallet-balance"))
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["code"], "server_error")
+        self.assertNotIn("hunter2", response.content.decode())
+
+    def test_logs_get_masked_phone_numbers_and_no_secrets(self):
+        masked = mask_pii({"phone": "08031234567", "pin": "2580",
+                           "data": [{"email": "ade@example.com", "unique_element": "08031234567"}]})
+
+        self.assertEqual(masked, {"phone": "080***4567",
+                                  "data": [{"email": "ad***@example.com", "unique_element": "080***4567"}]})
+
+
+@override_settings(STORAGES=PLAIN_STATIC)
+class StaffAccessTests(TestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(email="ops@example.com", password="Pass-Phrase-9", is_staff=True)
+
+    def test_admin_sign_in_goes_through_allauth(self):
+        response = self.client.get(reverse("admin:login"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response["Location"].startswith("/accounts/login/"))
+
+    @override_settings(STAFF_MFA_REQUIRED=True)
+    def test_staff_must_set_up_an_authenticator_app_before_using_the_admin(self):
+        self.client.force_login(self.staff)
+
+        without = self.client.get(reverse("admin:index"))
+        Authenticator.objects.create(user=self.staff, type=Authenticator.Type.TOTP, data={})
+        with_app = self.client.get(reverse("admin:index"))
+
+        self.assertEqual(without.status_code, 302)
+        self.assertTrue(without["Location"].startswith(reverse("mfa_activate_totp")))
+        self.assertEqual(with_app.status_code, 200)
+
+    def test_public_signup_on_the_staff_pages_is_closed(self):
+        self.client.post("/accounts/signup/", {"email": "intruder@example.com",
+                                               "password1": "Pass-Phrase-9", "password2": "Pass-Phrase-9"})
+
+        self.assertFalse(User.objects.filter(email="intruder@example.com").exists())
+
+    def test_staff_roles_give_wallet_adjustments_only_to_finance(self):
+        call_command("setup_staff_roles", stdout=io.StringIO())
+        call_command("setup_staff_roles", stdout=io.StringIO())  # safe to run again
+
+        finance = set(Group.objects.get(name="Finance").permissions.values_list("codename", flat=True))
+        support = set(Group.objects.get(name="Support").permissions.values_list("codename", flat=True))
+        self.assertIn("adjust_wallet", finance)
+        self.assertNotIn("adjust_wallet", support)
+        self.assertIn("view_paymentintent", support)
+
+
+class LogRetentionTests(TestCase):
+    def test_old_logs_are_only_deleted_with_apply(self):
+        old = ProviderLog.objects.create(service_type="vtpass", request_payload={}, response_payload={}, status_code="000")
+        recent = ProviderLog.objects.create(service_type="vtpass", request_payload={}, response_payload={}, status_code="000")
+        ProviderLog.objects.filter(pk=old.pk).update(timestamp=timezone.now() - timedelta(days=200))
+
+        call_command("purge_old_logs", stdout=io.StringIO())
+        self.assertTrue(ProviderLog.objects.filter(pk=old.pk).exists())
+
+        call_command("purge_old_logs", "--apply", stdout=io.StringIO())
+        self.assertFalse(ProviderLog.objects.filter(pk=old.pk).exists())
+        self.assertTrue(ProviderLog.objects.filter(pk=recent.pk).exists())
