@@ -12,6 +12,7 @@ VIEWABLE = [
     ("services", "providerlog"),
     ("notifications", "emaillog"),
     ("rewards", "loyaltyledger"),
+    ("core", "loginactivity"),
 ]
 SUPPORT = [f"{app}.view_{model}" for app, model in VIEWABLE]
 ROLES = {

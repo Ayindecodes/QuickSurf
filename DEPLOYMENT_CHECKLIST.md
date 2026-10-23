@@ -25,7 +25,10 @@ Then run `python manage.py check --deploy`.
 - **Build command:** `pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate`
 - **Start command:** `gunicorn quicksurf.wsgi:application`. Port, workers and the 90s timeout come from `gunicorn.conf.py`.
 - **Cron jobs** (see README "Operations"):
+  - `ops_alerts` (every 15 min)
   - `requery_pending`
+  - `daily_report` (daily)
+  - `purge_old_logs --apply` (weekly)
   - `verify_pending_topups`
   - `vtpass_balance --warn-below 10000`
   - `check_wallets`
@@ -34,6 +37,7 @@ Then run `python manage.py check --deploy`.
   - VTpass callback → `https://<host>/api/services/vtpass/callback/`
 
 ## 4) One-time setup
+- Set `OPS_ALERT_EMAILS` (and optionally `SENTRY_DSN`), and point an uptime monitor at `/api/health/` (see docs/runbooks/README.md).
 - `python manage.py setup_staff_roles`, then put staff in the Support or Finance group.
 - Each staff member signs in at `/<ADMIN_URL>` and sets up an authenticator app.
 

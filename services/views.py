@@ -23,6 +23,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.privacy import mask_pii
+from core.request_id import current_request_id
 from core.throttling import PurchaseRateThrottle, SafeAnonRateThrottle, SafeUserRateThrottle
 from users.security import PinError, check_pin
 from wallets import services as wallet_services
@@ -452,7 +453,8 @@ class AirtimePurchaseView(APIView):
             except Exception:
                 pass
             return Response(
-                {"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY
+                {"error": PURCHASE_ERROR, "client_reference": client_ref, "request_id": current_request_id()},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
         finally:
             _release_purchase_locks(k_ref, k_line)
@@ -593,7 +595,8 @@ class DataPurchaseView(APIView):
             except Exception:
                 pass
             return Response(
-                {"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY
+                {"error": PURCHASE_ERROR, "client_reference": client_ref, "request_id": current_request_id()},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
         finally:
             _release_purchase_locks(k_ref, k_line)

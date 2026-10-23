@@ -1,4 +1,5 @@
 # payments/views.py
+import logging
 import uuid
 from decimal import Decimal
 
@@ -12,6 +13,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.alerts import BAD_WEBHOOK_SIGNATURES, count_event
+from core.net import client_ip
 from core.throttling import SafeAnonRateThrottle, SafeUserRateThrottle, TopupRateThrottle
 
 from .models import PaymentIntent
@@ -28,6 +31,8 @@ from .services import (
     set_status_unless_final,
     trim_payload,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---- endpoints ---------------------------------------------------------------
 PaymentInitResponseSchema = inline_serializer(
@@ -199,6 +204,9 @@ class PaystackWebhookView(APIView):
         sig = request.headers.get("X-Paystack-Signature") or request.headers.get("x-paystack-signature")
         raw = request.body
         if not valid_webhook(sig, raw):
+            # A burst of these means a wrong PAYSTACK_SECRET_KEY (e.g. after rotating keys) or forgery.
+            count_event(BAD_WEBHOOK_SIGNATURES)
+            logger.warning("Rejected a Paystack webhook with a bad signature from %s", client_ip(request))
             return Response({"detail": "Invalid signature"}, status=401)
 
         try:
