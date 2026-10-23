@@ -1,10 +1,14 @@
 import csv
 import io
+import os
+import subprocess
+import sys
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.conf import settings
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from payments.models import PaymentIntent
 from services.models import AirtimeTransaction, DataTransaction, ProviderLog
@@ -13,6 +17,8 @@ from wallets import services as wallet_services
 from wallets.models import Wallet
 
 PHONE = "08031234567"
+REDIS_THAT_IS_DOWN = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache",
+                                  "LOCATION": "redis://127.0.0.1:9/0"}}
 
 
 def _audit_rows():
@@ -109,9 +115,58 @@ class AuditMoneyTests(TestCase):
         self.assertEqual((self.wallet.balance, self.wallet.locked), (Decimal("1000.00"), Decimal("0.00")))
         call_command("check_wallets", stdout=io.StringIO())
 
+    def test_health_reports_database_and_cache(self):
+        response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["checks"], {"database": "ok", "cache": "ok"})
+
+    @override_settings(CACHES=REDIS_THAT_IS_DOWN)
+    def test_health_stays_up_when_only_the_cache_is_down(self):
+        response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["checks"], {"database": "ok", "cache": "error"})
+
     def test_text_report_lists_every_section(self):
         out = io.StringIO()
         call_command("audit_money", stdout=out)
 
         self.assertIn("Wallets whose balance doesn't match their history: 0", out.getvalue())
         self.assertIn("Read-only: nothing was changed.", out.getvalue())
+
+
+class ProductionSettingsTests(SimpleTestCase):
+    """Production must refuse to start with settings that would lose money or data."""
+
+    SAFE_LIVE = {
+        "ENV": "production", "SECRET_KEY": "x" * 50, "DATABASE_URL": "postgres://u:p@db.example.com:5432/quicksurf",
+        "PAYSTACK_SECRET_KEY": "sk_live_123", "PROVIDER_MODE": "LIVE", "VTPASS_BASE_URL": "https://vtpass.com/api",
+        "VTPASS_API_KEY": "a", "VTPASS_PUBLIC_KEY": "b", "VTPASS_SECRET_KEY": "c",
+    }
+
+    def _boot(self, **changes):
+        # Blank values (not missing ones): python-decouple would fall back to a developer's .env file.
+        env = {**os.environ, **self.SAFE_LIVE, **changes}
+        return subprocess.run([sys.executable, "-c", "import quicksurf.settings"], cwd=settings.BASE_DIR,
+                              env=env, capture_output=True, text=True)
+
+    def test_a_complete_live_configuration_starts(self):
+        result = self._boot()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_refuses_to_start_without_an_explicit_provider_mode(self):
+        result = self._boot(PROVIDER_MODE="")
+        self.assertIn("PROVIDER_MODE must be LIVE or SANDBOX", result.stderr)
+
+    def test_refuses_live_mode_without_vtpass_keys(self):
+        result = self._boot(VTPASS_SECRET_KEY="")
+        self.assertIn("missing: VTPASS_SECRET_KEY", result.stderr)
+
+    def test_refuses_live_mode_pointed_at_the_vtpass_sandbox(self):
+        result = self._boot(VTPASS_BASE_URL="https://sandbox.vtpass.com/api")
+        self.assertIn("points at the VTpass sandbox", result.stderr)
+
+    def test_refuses_to_start_without_a_database_url(self):
+        result = self._boot(DATABASE_URL="")
+        self.assertIn("DATABASE_URL is required", result.stderr)

@@ -2,29 +2,36 @@
 
 ## 1) Secrets and environment
 - Rotate all currently exposed live keys before deployment.
-- Copy `.env.production.example` to `.env.production`.
-- Fill all placeholder values.
-- Keep `.env.production` private (it is gitignored).
+- Set every value from `.env.production.example` in the Render environment (never commit them).
 
-## 2) Mandatory production checks
-- Ensure:
-  - `ENV=production`
-  - `DEBUG=False`
-  - `DB_SSL_REQUIRE=True`
-  - `PROVIDER_MODE=LIVE`
-  - `REDIS_URL` is set
-- Run:
-  - `.\.venv\Scripts\python.exe manage.py check`
-  - `.\.venv\Scripts\python.exe manage.py check --deploy`
+## 2) Mandatory production settings
+The app refuses to start if any of these are missing or unsafe:
+- `ENV=production`, `SECRET_KEY`, `DATABASE_URL`
+- `PROVIDER_MODE=LIVE` (explicit), with `VTPASS_API_KEY`, `VTPASS_PUBLIC_KEY`, `VTPASS_SECRET_KEY`,
+  and a non-sandbox `VTPASS_BASE_URL`
+- `PAYSTACK_SECRET_KEY` starting with `sk_live_`
 
-## 3) Database/static
-- Run:
-  - `.\.venv\Scripts\python.exe manage.py migrate`
-  - `.\.venv\Scripts\python.exe manage.py collectstatic --noinput`
+Also set:
+- `DEBUG=False`, `DB_SSL_REQUIRE=True`
+- `REDIS_URL`: purchase locks and rate limits are per-process without it
+
+Then run `python manage.py check --deploy`.
+
+## 3) Render service
+- **Build command:** `pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate`
+- **Start command:** `gunicorn quicksurf.wsgi:application`. Port, workers and the 90s timeout come from `gunicorn.conf.py`.
+- **Cron jobs** (see README "Operations"):
+  - `requery_pending`
+  - `verify_pending_topups`
+  - `vtpass_balance --warn-below 10000`
+  - `check_wallets`
+- **Callbacks:**
+  - Paystack webhook → `https://<host>/api/payments/webhook/`
+  - VTpass callback → `https://<host>/api/services/vtpass/callback/`
 
 ## 4) Live endpoint smoke tests
 - Health:
-  - `GET /api/health/` -> expect `200`
+  - `GET /api/health/` -> expect `200` with `"database": "ok"` and `"cache": "ok"`
 - Auth:
   - `POST /api/users/register/` -> expect `201`, `access` + `refresh`
   - `POST /api/users/login/` -> expect `200`, `access` + `refresh`
@@ -32,18 +39,17 @@
   - `GET /api/wallet/` with Bearer token -> expect `200`
   - `GET /api/wallet/transactions/` with Bearer token -> expect `200` (ledger entries)
 - Services:
-  - `POST /api/services/airtime/` with a tiny amount -> expect `201` or controlled `4xx/5xx` with JSON
-  - `POST /api/services/data/` with valid plan -> expect `201` or controlled `4xx/5xx` with JSON
+  - `GET /api/services/plans/mtn/` -> expect `200` with plans and prices
+  - `POST /api/services/airtime/` with a small amount (minimum ₦50) -> expect `201` or a controlled `4xx/5xx` with JSON
+  - `POST /api/services/data/` with a plan from `/plans/` -> expect `201` or a controlled `4xx/5xx` with JSON
 - Payments:
   - `POST /api/payments/init/` -> expect `201` with `reference` + `authorization_url`
   - `GET /api/payments/verify/{reference}/` -> expect JSON status
-  - Trigger Paystack webhook -> expect `200` and wallet credit once only
+  - Trigger a Paystack webhook -> expect `200` and the wallet credited once only
 
 ## 5) Post-deploy verification
-- Confirm logs show:
-  - `BOOT ENV=production`
-  - `PROVIDER_MODE=LIVE`
+- Confirm the logs show `BOOT ENV=production` and `PROVIDER_MODE=LIVE`.
 - Run `python manage.py check_wallets` -> expect every wallet to match its ledger.
-- Confirm no repeated provider debits for same `client_reference`.
+- Run `python manage.py vtpass_balance` -> expect the VTpass wallet balance.
+- Confirm no repeated provider debits for the same `client_reference`.
 - Confirm rewards and receipt email logs are created once per successful purchase.
-

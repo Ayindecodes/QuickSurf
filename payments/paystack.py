@@ -1,5 +1,5 @@
 # payments/paystack.py
-import hmac, hashlib, json, requests
+import hmac, hashlib, requests
 from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
 

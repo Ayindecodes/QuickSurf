@@ -53,17 +53,11 @@ def services_system_checks(app_configs, **kwargs):
         )
 
     # 2) Provider mode + VTpass credentials sanity
-    provider_mode = str(getattr(settings, "PROVIDER_MODE", "MOCK")).upper()
-    vt_email = getattr(settings, "VTPASS_EMAIL", "")
-    vt_api = getattr(settings, "VTPASS_API_KEY", "")
-    vt_pub = getattr(settings, "VTPASS_PUBLIC_KEY", "")
+    provider_mode = str(getattr(settings, "PROVIDER_MODE", "SANDBOX")).upper()
 
     if provider_mode == "LIVE":
-        missing = [k for k, v in {
-            "VTPASS_EMAIL": vt_email,
-            "VTPASS_API_KEY": vt_api,
-            "VTPASS_PUBLIC_KEY": vt_pub,
-        }.items() if not v]
+        missing = [k for k in ("VTPASS_API_KEY", "VTPASS_PUBLIC_KEY", "VTPASS_SECRET_KEY")
+                   if not getattr(settings, k, "")]
         if missing:
             messages.append(
                 Warning(
@@ -89,8 +83,8 @@ def services_system_checks(app_configs, **kwargs):
                         "Non-Redis cache backend detected while in LIVE mode.",
                         id="services.W002",
                         hint=(
-                            "Single-flight locks use Django cache. Configure REDIS_URL and the "
-                            "django-redis backend for reliability under load."
+                            "Purchase locks and rate limits use the Django cache, which is per-process "
+                            "without Redis. Set REDIS_URL."
                         ),
                     )
                 )

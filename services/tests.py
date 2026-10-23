@@ -688,6 +688,15 @@ class VTpassPurchaseTests(APITestCase):
         self.assertEqual(too_big.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(self._wallet(), (Decimal("1000.00"), Decimal("0.00")))
 
+    @override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache",
+                                           "LOCATION": "redis://127.0.0.1:9/0"}})
+    def test_purchases_still_work_when_the_cache_is_down(self):
+        with self.assertLogs("services.views", level="ERROR"):
+            response = self._buy("NOCACHE-1", VTPASS_DELIVERED)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(_ledger_types("airtime:NOCACHE-1"), ["hold", "capture"])
+
 
 class DataPlanCatalogTests(APITestCase):
     def setUp(self):
