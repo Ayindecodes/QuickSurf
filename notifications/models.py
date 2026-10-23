@@ -9,6 +9,7 @@ class EmailLog(models.Model):
         max_length=16, choices=[("queued", "Queued"), ("sent", "Sent"), ("failed", "Failed")], default="queued"
     )
     error = models.TextField(blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)  # queued emails are retried a few times
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

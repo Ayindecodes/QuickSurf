@@ -25,6 +25,7 @@ from rest_framework.test import APITestCase
 from core.alerts import BAD_WEBHOOK_SIGNATURES, count_event, event_count
 from core.net import client_ip
 from core.privacy import mask_pii
+from core.renderers import error_envelope
 from core.request_id import JsonFormatter, RequestIdFilter, _current
 from notifications.models import EmailLog
 from notifications.utils import send_email
@@ -278,8 +279,9 @@ class RequestSafetyTests(APITestCase):
         response = self.client.get("/api/schema/", {"format": "json"})
 
         paths = json.loads(response.content)["paths"]
-        self.assertIn("/api/users/login/", paths)
-        self.assertNotIn("/api/users/login", paths)  # the no-slash alias still works but isn't documented
+        self.assertIn("/api/v1/users/login/", paths)
+        self.assertNotIn("/api/v1/users/login", paths)  # the no-slash alias still works but isn't documented
+        self.assertNotIn("/api/users/login/", paths)  # the unversioned copy works but only v1 is documented
 
     def test_logs_get_masked_phone_numbers_and_no_secrets(self):
         masked = mask_pii(
@@ -580,3 +582,43 @@ class SupportAdminTests(TestCase):
         self.assertEqual(
             sorted(history), ["Marked email as verified", "Signed out on all devices", "Unlocked transaction PIN"]
         )
+
+
+class ApiVersionTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(email="v1@example.com", password="Pass-Phrase-9")
+        self.client.force_authenticate(self.user)
+
+    def test_v1_field_errors_come_in_the_error_envelope_with_the_request_id(self):
+        response = self.client.post(
+            "/api/v1/users/me/password/", {"current_password": "nope", "new_password": "x"}, format="json"
+        )
+
+        body = response.json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(body["error"]["code"], "invalid")
+        self.assertEqual(body["error"]["fields"], {"current_password": ["Wrong password."]})
+        self.assertEqual(body["request_id"], response["X-Request-ID"])
+
+    def test_v1_detail_and_coded_errors_keep_their_code_and_message(self):
+        missing = self.client.get("/api/v1/services/receipts/NOPE/").json()
+        self.client.force_authenticate(None)
+        anonymous = self.client.get("/api/v1/wallet/").json()
+
+        self.assertEqual(missing["error"], {"code": "not_found", "message": "Purchase not found."})
+        self.assertEqual(anonymous["error"]["code"], "not_authenticated")
+        self.assertNotIn("fields", anonymous["error"])
+
+    def test_extra_values_stay_next_to_the_message(self):
+        envelope = error_envelope({"error": "Price changed.", "code": "price_changed", "price": "500.00"}, 409)
+
+        self.assertEqual(envelope["error"], {"code": "price_changed", "message": "Price changed.", "price": "500.00"})
+
+    def test_unversioned_api_keeps_its_old_error_shape(self):
+        response = self.client.get("/api/services/receipts/NOPE/")
+
+        self.assertEqual(response.json(), {"detail": "Purchase not found."})
+
+    def test_successful_responses_are_the_same_on_both_paths(self):
+        self.assertEqual(self.client.get("/api/v1/wallet/").json(), self.client.get("/api/wallet/").json())

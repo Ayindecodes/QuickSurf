@@ -4,9 +4,13 @@ from django.db import models
 
 class LoyaltyLedger(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="loyalty_entries")
-    points = models.PositiveIntegerField()
+    # Earned points are positive; redemptions and points taken back for reversed purchases are negative.
+    points = models.IntegerField()
     reason = models.CharField(max_length=128)
-    txn_type = models.CharField(max_length=16, choices=[("airtime", "Airtime"), ("data", "Data")])
+    txn_type = models.CharField(
+        max_length=16,
+        choices=[("airtime", "Airtime"), ("data", "Data"), ("redemption", "Redemption"), ("reversal", "Reversal")],
+    )
     txn_id = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -17,4 +21,4 @@ class LoyaltyLedger(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.user_id} +{self.points} {self.txn_type} {self.txn_id}"
+        return f"{self.user_id} {self.points:+} {self.txn_type} {self.txn_id}"

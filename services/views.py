@@ -14,9 +14,9 @@ from django.utils.dateparse import parse_date
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serializer
+from rest_framework import generics, status
 from rest_framework import serializers as drf_serializers
-from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -29,12 +29,15 @@ from users.security import PinError, check_pin
 from wallets import services as wallet_services
 from wallets.models import Wallet
 
-from .models import AirtimeTransaction, DataTransaction, ProviderLog
+from .models import AirtimeTransaction, Beneficiary, DataTransaction, ProviderLog
+from .networks import detect_network
 from .serializers import (
     AirtimePurchaseRequestSerializer,
     AirtimeTransactionSerializer,
+    BeneficiarySerializer,
     DataPurchaseRequestSerializer,
     DataTransactionSerializer,
+    normalize_ng_phone,
 )
 from .settlement import FINAL_STATUSES, ledger_reference, purchase_kind, settle_purchase
 from .vtpass import (
@@ -721,3 +724,78 @@ class VTPassCallbackView(APIView):
                 except Exception:
                     logger.exception("VTpass callback: requery failed for request %s", request_id)
         return Response({"response": "success"})
+
+
+# ===================== Receipts =====================
+def _user_purchase(user, client_reference):
+    return (
+        AirtimeTransaction.objects.filter(user=user, client_reference=client_reference).first()
+        or DataTransaction.objects.filter(user=user, client_reference=client_reference).first()
+    )
+
+
+@extend_schema(
+    description="A receipt for one of the user's purchases.", responses={200: OpenApiTypes.OBJECT, 404: DetailSchema}
+)
+class ReceiptView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, client_reference: str):
+        txn = _user_purchase(request.user, client_reference)
+        if txn is None:
+            return Response({"detail": "Purchase not found."}, status=status.HTTP_404_NOT_FOUND)
+        is_data = isinstance(txn, DataTransaction)
+        return Response(
+            {
+                "reference": txn.client_reference,
+                "date": txn.timestamp,
+                "item": f"Data {txn.plan}" if is_data else "Airtime",
+                "network": txn.network,
+                "phone": txn.phone,
+                "amount": str(txn.amount),
+                "status": txn.status,
+                "vtpass_request_id": txn.provider_request_id,
+                "vtpass_transaction_id": txn.provider_reference,
+            }
+        )
+
+
+# ===================== Saved numbers & network detection =====================
+@extend_schema(description="The user's saved numbers (GET) or save one (POST {name, phone, network}).")
+class BeneficiaryListView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = BeneficiarySerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        return Beneficiary.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+@extend_schema(description="Remove a saved number.")
+class BeneficiaryDetailView(generics.DestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = BeneficiarySerializer
+
+    def get_queryset(self):
+        return Beneficiary.objects.filter(user=self.request.user)
+
+
+@extend_schema(
+    description="Guess a number's network from its prefix. Numbers can be ported, so let the user change it.",
+    parameters=[OpenApiParameter(name="phone", required=True, type=str)],
+    responses={200: OpenApiTypes.OBJECT},
+)
+class DetectNetworkView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        phone = normalize_ng_phone(request.query_params.get("phone", ""))
+        if not phone:
+            return Response(
+                {"phone": ["Enter a Nigerian number like 0703xxxxxxx or +234703xxxxxxx."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"phone": phone, "network": detect_network(phone)})

@@ -1,4 +1,10 @@
 # wallets/views.py
+import csv
+from datetime import timedelta
+
+from django.http import HttpResponse
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -9,6 +15,7 @@ from rest_framework.views import APIView
 from services.models import AirtimeTransaction, DataTransaction
 
 from . import services as wallet_services
+from .history import KINDS, describe, history
 from .models import Wallet
 from .serializers import (
     AdjustmentSerializer,
@@ -154,3 +161,72 @@ class AdjustView(APIView):
         except wallet_services.InsufficientFunds:
             return Response({"amount": ["This would take the balance below zero."]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(TransactionSerializer(entry).data, status=status.HTTP_201_CREATED)
+
+
+HISTORY_PARAMETERS = [
+    OpenApiParameter(name="kind", required=False, type=str, enum=sorted(set(KINDS.values()))),
+    OpenApiParameter(name="date_from", required=False, type=str, description="YYYY-MM-DD"),
+    OpenApiParameter(name="date_to", required=False, type=str, description="YYYY-MM-DD"),
+]
+
+
+def _date_param(request, name):
+    value = request.query_params.get(name)
+    return parse_date(value) if value else None
+
+
+@extend_schema(
+    description="Everything that moved money in the wallet, newest first: top-ups, purchases (with their current "
+    "status), refunds, rewards and corrections. Amounts are signed.",
+    request=None,
+    parameters=[
+        *HISTORY_PARAMETERS,
+        OpenApiParameter(name="page", required=False, type=int),
+        OpenApiParameter(name="page_size", required=False, type=int),
+    ],
+    responses={200: OpenApiResponse(description="Paginated history lines")},
+)
+class HistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        wallet = Wallet.objects.get(user=request.user)
+        rows = history(
+            wallet, request.query_params.get("kind"), _date_param(request, "date_from"), _date_param(request, "date_to")
+        )
+        paginator = SafePaginator()
+        page = paginator.paginate_queryset(rows, request)
+        return paginator.get_paginated_response(describe(page))
+
+
+STATEMENT_MAX_DAYS = 366
+STATEMENT_COLUMNS = ["date", "kind", "description", "amount", "balance_after", "reference", "status"]
+
+
+@extend_schema(
+    description="The history as a CSV statement for a date range (default: the last 30 days, at most a year).",
+    request=None,
+    parameters=HISTORY_PARAMETERS[1:],
+    responses={200: OpenApiResponse(description="text/csv")},
+)
+class StatementView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        date_to = _date_param(request, "date_to") or timezone.localdate()
+        date_from = _date_param(request, "date_from") or date_to - timedelta(days=30)
+        if date_from > date_to or (date_to - date_from).days > STATEMENT_MAX_DAYS:
+            return Response(
+                {"error": f"Pick a range of at most {STATEMENT_MAX_DAYS} days.", "code": "invalid_range"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        wallet = Wallet.objects.get(user=request.user)
+        lines = describe(history(wallet, date_from=date_from, date_to=date_to))
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="quicksurf-statement-{date_from}-to-{date_to}.csv"'
+        writer = csv.DictWriter(response, fieldnames=STATEMENT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for line in reversed(lines):  # oldest first, like a bank statement
+            writer.writerow({**line, "date": timezone.localtime(line["date"]).strftime("%Y-%m-%d %H:%M")})
+        return response

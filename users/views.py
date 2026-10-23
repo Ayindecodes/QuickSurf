@@ -20,14 +20,25 @@ from core.net import client_ip
 from core.throttling import LoginEmailRateThrottle, SafeAnonRateThrottle, SafeScopedRateThrottle, SafeUserRateThrottle
 
 from .models import OneTimeCode, TransactionPin
-from .security import end_all_sessions, issue_code, redeem_code, send_code, set_pin
+from .security import (
+    AccountNotEmpty,
+    close_account,
+    end_all_sessions,
+    issue_code,
+    redeem_code,
+    send_code,
+    set_pin,
+)
 from .serializers import (
+    ChangePasswordSerializer,
+    CloseAccountSerializer,
     CodeSerializer,
     LoginRequestSchema,
     LogoutSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
     PinSerializer,
+    ProfileSerializer,
     TokenPairSchema,
     UserSerializer,
 )
@@ -383,3 +394,63 @@ class DashboardView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+# ---------------------------
+# Profile
+# ---------------------------
+@extend_schema(
+    description="GET the signed-in user's profile; PATCH first_name, last_name, phone; DELETE {password} closes the "
+    "account (refused while the wallet holds money or a purchase is pending).",
+    request=ProfileSerializer,
+    responses={200: ProfileSerializer},
+)
+class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(ProfileSerializer(request.user).data)
+
+    def patch(self, request):
+        serializer = ProfileSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def delete(self, request):
+        serializer = CloseAccountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if not request.user.check_password(serializer.validated_data["password"]):
+            return Response({"password": ["Wrong password."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            close_account(request.user)
+        except AccountNotEmpty as e:
+            return Response({"error": str(e), "code": "account_not_empty"}, status=status.HTTP_409_CONFLICT)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@extend_schema(
+    description="Change the password. Signs out every other device and returns fresh tokens for this one.",
+    request=ChangePasswordSerializer,
+    responses={200: TokenPairSchema},
+)
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = SCOPED_THROTTLES
+    throttle_scope = "password_change"
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user, data = request.user, serializer.validated_data
+        if not user.check_password(data["current_password"]):
+            return Response({"current_password": ["Wrong password."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_password(data["new_password"], user=user)
+        except DjangoValidationError as e:
+            return Response({"new_password": list(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(data["new_password"])
+        user.save(update_fields=["password"])
+        end_all_sessions(user)
+        return Response({"detail": "Password changed.", **_tokens(user)})
