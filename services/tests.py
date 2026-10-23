@@ -150,6 +150,24 @@ class AirtimePurchaseTests(APITestCase):
         self.assertEqual(self.wallet.locked, Decimal("0.00"))
 
 
+DATA_PLAN_PRICES = {"mtn-1gb": "1200.00", "mtn-500mb": "900.00"}
+
+DATA_DELIVERED = {
+    "ok": True,
+    "provider": {
+        "code": "000",
+        "response_description": "TRANSACTION SUCCESSFUL",
+        "content": {"transactions": {"status": "delivered", "transactionId": "TX-DATA"}},
+    },
+}
+
+
+def _variations_response(prices, key="variations"):
+    """Shape returned by services.vtpass.get_service_variations."""
+    plans = [{"variation_code": code, "variation_amount": amount} for code, amount in prices.items()]
+    return {"ok": True, "code": "000", "content": {key: plans}, "http_status": 200}
+
+
 class DataPurchaseTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="data@example.com", password="StrongPass123")
@@ -158,6 +176,113 @@ class DataPurchaseTests(APITestCase):
         self.wallet.save(update_fields=["balance"])
         self.client.force_authenticate(self.user)
         self.url = reverse("data-purchase")
+
+        patcher = patch(
+            "services.views.get_service_variations",
+            return_value=_variations_response(DATA_PLAN_PRICES),
+        )
+        self.mock_variations = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @patch("services.views.purchase_data")
+    def test_data_purchase_rejects_amount_that_does_not_match_vtpass_price(self, mock_purchase_data):
+        response = self.client.post(
+            self.url,
+            {
+                "amount": "1.00",
+                "network": "mtn",
+                "phone": "08031234567",
+                "plan": "mtn-1gb",
+                "client_reference": "DATA-CHEAP-001",
+            },
+            format="json",
+        )
+
+        self.wallet.refresh_from_db()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["price"], "1200.00")
+        self.assertFalse(DataTransaction.objects.filter(client_reference="DATA-CHEAP-001").exists())
+        self.assertEqual(self.wallet.balance, Decimal("3000.00"))
+        self.assertEqual(mock_purchase_data.call_count, 0)
+
+    @patch("services.views.purchase_data", return_value=DATA_DELIVERED)
+    def test_data_purchase_without_amount_charges_vtpass_price(self, _mock_purchase_data):
+        response = self.client.post(
+            self.url,
+            {
+                "network": "mtn",
+                "phone": "08031234567",
+                "plan": "mtn-1gb",
+                "client_reference": "DATA-NOAMT-001",
+            },
+            format="json",
+        )
+
+        self.wallet.refresh_from_db()
+        txn = DataTransaction.objects.get(client_reference="DATA-NOAMT-001")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(txn.amount, Decimal("1200.00"))
+        self.assertEqual(self.wallet.balance, Decimal("1800.00"))
+
+    @patch("services.views.purchase_data", return_value=DATA_DELIVERED)
+    def test_data_purchase_reads_misspelled_varations_key(self, _mock_purchase_data):
+        self.mock_variations.return_value = _variations_response(DATA_PLAN_PRICES, key="varations")
+
+        response = self.client.post(
+            self.url,
+            {"amount": "900.00", "network": "mtn", "phone": "08031234567", "plan": "mtn-500mb"},
+            format="json",
+        )
+
+        self.wallet.refresh_from_db()
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self.wallet.balance, Decimal("2100.00"))
+
+    @patch("services.views.purchase_data")
+    def test_data_purchase_rejects_unknown_plan(self, mock_purchase_data):
+        response = self.client.post(
+            self.url,
+            {"amount": "1.00", "network": "mtn", "phone": "08031234567", "plan": "mtn-made-up-plan"},
+            format="json",
+        )
+
+        self.wallet.refresh_from_db()
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.wallet.balance, Decimal("3000.00"))
+        self.assertEqual(mock_purchase_data.call_count, 0)
+
+    @patch("services.views.purchase_data")
+    def test_data_purchase_fails_closed_when_vtpass_prices_unavailable(self, mock_purchase_data):
+        self.mock_variations.return_value = {
+            "ok": False,
+            "code": "999",
+            "response_description": "Network error",
+            "content": None,
+            "http_status": 0,
+        }
+
+        response = self.client.post(
+            self.url,
+            {
+                "amount": "1200.00",
+                "network": "mtn",
+                "phone": "08031234567",
+                "plan": "mtn-1gb",
+                "client_reference": "DATA-NOPRICE-001",
+            },
+            format="json",
+        )
+
+        self.wallet.refresh_from_db()
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertFalse(DataTransaction.objects.filter(client_reference="DATA-NOPRICE-001").exists())
+        self.assertEqual(self.wallet.balance, Decimal("3000.00"))
+        self.assertEqual(mock_purchase_data.call_count, 0)
 
     @patch("services.views.purchase_data")
     def test_data_purchase_success_debits_wallet_and_marks_successful(self, mock_purchase_data):

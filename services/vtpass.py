@@ -192,6 +192,14 @@ def strict_map_outcome(body: Dict) -> str:
     return "failed"
 
 
+def extract_variations(content: Any) -> list:
+    """Plan list from a /service-variations response (VTpass sometimes spells the key "varations")."""
+    if not isinstance(content, dict):
+        return []
+    found = content.get("variations") or content.get("varations")
+    return found if isinstance(found, list) else []
+
+
 # ============================================================================
 # Service IDs
 # ============================================================================

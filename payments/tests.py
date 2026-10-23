@@ -6,8 +6,15 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from payments.models import PaymentIntent
+from payments.views import _credit_wallet_once
 from users.models import User
 from wallets.models import Wallet
+
+VERIFY_GATEWAY_ERROR = (502, {"raw": "<html>Bad gateway</html>", "http_status": 502})
+
+
+def _verify_success(amount_kobo):
+    return (200, {"status": True, "data": {"status": "success", "amount": amount_kobo, "currency": "NGN"}})
 
 
 class PaymentFlowTests(APITestCase):
@@ -50,6 +57,55 @@ class PaymentFlowTests(APITestCase):
         self.assertFalse(second.data["credited"])
         self.assertEqual(self.wallet.balance, Decimal("1500.00"))
         self.assertEqual(intent.status, "success")
+
+    @patch("payments.views.ps_verify")
+    def test_verify_does_not_credit_again_after_a_transient_provider_error(self, mock_verify):
+        intent = PaymentIntent.objects.create(
+            user=self.user,
+            amount=Decimal("1500.00"),
+            reference="PAY-TRANSIENT-1",
+            status="pending",
+        )
+        mock_verify.side_effect = [_verify_success(150000), VERIFY_GATEWAY_ERROR, _verify_success(150000)]
+        url = reverse("payments_verify", args=[intent.reference])
+
+        responses = [self.client.get(url) for _ in range(3)]
+
+        self.wallet.refresh_from_db()
+        intent.refresh_from_db()
+
+        self.assertEqual([r.data["status"] for r in responses], ["success", "success", "success"])
+        self.assertEqual(self.wallet.balance, Decimal("1500.00"))
+        self.assertEqual(intent.status, "success")
+
+    @patch("payments.views.ps_verify")
+    def test_verify_never_downgrades_an_intent_credited_during_the_call(self, mock_verify):
+        intent = PaymentIntent.objects.create(
+            user=self.user,
+            amount=Decimal("1500.00"),
+            reference="PAY-RACE-1",
+            status="pending",
+        )
+
+        def webhook_credits_while_verify_waits(reference):
+            _credit_wallet_once(self.user, intent.amount, reference)
+            return VERIFY_GATEWAY_ERROR
+
+        mock_verify.side_effect = webhook_credits_while_verify_waits
+        url = reverse("payments_verify", args=[intent.reference])
+
+        self.client.get(url)
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, "success")
+
+        mock_verify.side_effect = None
+        mock_verify.return_value = _verify_success(150000)
+        later = self.client.get(url)
+
+        self.wallet.refresh_from_db()
+
+        self.assertFalse(later.data["credited"])
+        self.assertEqual(self.wallet.balance, Decimal("1500.00"))
 
     @patch("payments.views.ps_initialize", side_effect=Exception("provider timeout"))
     def test_init_handles_provider_exception_and_marks_intent_failed(self, _mock_initialize):
@@ -106,3 +162,24 @@ class PaymentFlowTests(APITestCase):
         self.assertEqual(self.wallet.balance, Decimal("800.00"))
         self.assertEqual(intent.status, "success")
         self.assertEqual(len(intent.webhook_events or []), 2)
+
+    @patch("payments.views.valid_webhook", return_value=True)
+    def test_charge_failed_webhook_does_not_undo_a_credit(self, _mock_valid_webhook):
+        intent = PaymentIntent.objects.create(
+            user=self.user,
+            amount=Decimal("800.00"),
+            reference="PAY-WEBHOOK-2",
+            status="pending",
+        )
+        success = {"event": "charge.success", "data": {"reference": intent.reference, "status": "success"}}
+        failed = {"event": "charge.failed", "data": {"reference": intent.reference, "status": "failed"}}
+        url = reverse("payments_webhook")
+
+        for payload in (success, failed, success):
+            self.client.post(url, payload, format="json")
+
+        self.wallet.refresh_from_db()
+        intent.refresh_from_db()
+
+        self.assertEqual(self.wallet.balance, Decimal("800.00"))
+        self.assertEqual(intent.status, "success")

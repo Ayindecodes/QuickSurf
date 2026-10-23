@@ -50,6 +50,12 @@ def _credit_wallet_once(user, amount: Decimal, reference: str):
         intent.mark_success(when=timezone.now())
     return True
 
+def _set_status_unless_success(intent, new_status: str) -> None:
+    """Change an intent's status without ever overwriting a credited (success) intent."""
+    PaymentIntent.objects.filter(pk=intent.pk).exclude(status="success").update(
+        status=new_status, updated=timezone.now()
+    )
+
 # ---- endpoints ---------------------------------------------------------------
 PaymentInitResponseSchema = inline_serializer(
     name="PaymentInitResponse",
@@ -158,6 +164,10 @@ class PaymentVerifyView(APIView):
         except PaymentIntent.DoesNotExist:
             return Response({"detail": "Unknown reference"}, status=404)
 
+        # Success is final: the wallet is already credited, so don't re-verify or touch the status.
+        if intent.status == "success":
+            return Response({"reference": reference, "status": "success", "credited": False})
+
         try:
             code, body = ps_verify(reference)
         except Exception:
@@ -182,13 +192,11 @@ class PaymentVerifyView(APIView):
             })
 
         if status_text in {"failed", "abandoned"}:
-            intent.status = "failed"
-            intent.save(update_fields=["status", "updated"])
+            _set_status_unless_success(intent, "failed")
             return Response({"reference": reference, "status": "failed"})
 
         # still pending
-        intent.status = "pending"
-        intent.save(update_fields=["status", "updated"])
+        _set_status_unless_success(intent, "pending")
         return Response({"reference": reference, "status": "pending"})
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -238,8 +246,7 @@ class PaystackWebhookView(APIView):
             return Response({"ok": True})
 
         if event == "charge.failed":
-            intent.status = "failed"
-            intent.save(update_fields=["status", "updated"])
+            _set_status_unless_success(intent, "failed")
             _log_provider(intent.user, reference, "webhook:charge.failed", None, payload, 200)
             return Response({"ok": True})
 
