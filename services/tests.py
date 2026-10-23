@@ -1,8 +1,11 @@
 import importlib
 import io
+import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 from decimal import Decimal
+from unittest import skipUnless
 from unittest.mock import patch
 
 import requests
@@ -10,16 +13,26 @@ from django.apps import apps
 from django.core.cache import cache
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase, APITransactionTestCase
+from rest_framework.test import APIClient, APITestCase, APITransactionTestCase
 
 from notifications.models import EmailLog
 from rewards.models import LoyaltyLedger
 from services.models import AirtimeTransaction, DataTransaction
-from services.vtpass import generate_request_id, get_balance, purchase_airtime, purchase_data, strict_map_outcome
+from services.serializers import normalize_ng_phone
+from services.vtpass import (
+    generate_request_id,
+    get_balance,
+    get_service_variations,
+    purchase_airtime,
+    purchase_data,
+    requery_status,
+    strict_map_outcome,
+)
 from users.models import User
 from wallets import services as wallet_services
 from wallets.models import Transaction, Wallet
@@ -830,3 +843,190 @@ class VTpassOpsTests(TestCase):
         txn.refresh_from_db()
         self.assertEqual(txn.provider_request_id, "AIRTIME_7_3")
         self.assertEqual(txn.provider_reference, "TX-9")
+
+
+def _vtpass_http(status_code, body=None, text=""):
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = (json.dumps(body) if body is not None else text).encode()
+    response.headers["Content-Type"] = "application/json" if body is not None else "text/html"
+    return response
+
+
+class VTpassHttpTests(SimpleTestCase):
+    def test_posts_send_the_secret_key_and_gets_send_the_public_key(self):
+        sent = []
+
+        def fake_request(**kwargs):
+            sent.append(kwargs)
+            return _vtpass_http(200, {"code": "000"})
+
+        with (
+            patch.multiple("services.vtpass", VTPASS_API_KEY="api", VTPASS_PUBLIC_KEY="pub", VTPASS_SECRET_KEY="sec"),
+            patch("services.vtpass.Session.request", side_effect=fake_request),
+        ):
+            purchase_airtime("mtn", "08031234567", 100)
+            get_service_variations("mtn-data")
+
+        post, get = sent[0]["headers"], sent[1]["headers"]
+        self.assertEqual((post["api-key"], post["secret-key"]), ("api", "sec"))
+        self.assertNotIn("public-key", post)
+        self.assertEqual((get["api-key"], get["public-key"]), ("api", "pub"))
+        self.assertNotIn("secret-key", get)
+
+    def test_an_html_error_page_from_vtpass_leaves_the_purchase_pending(self):
+        with patch("services.vtpass.Session.request", return_value=_vtpass_http(502, text="<html>Bad gateway</html>")):
+            result = purchase_airtime("mtn", "08031234567", 100)
+
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result["provider"]["http_status"], 502)
+
+    def test_requery_and_plan_list_responses_are_read(self):
+        delivered = {"code": "000", "content": {"transactions": {"status": "delivered"}}}
+        plans = {
+            "response_description": "000",
+            "content": {"varations": [{"variation_code": "x", "variation_amount": "100"}]},
+        }
+
+        with patch(
+            "services.vtpass.Session.request", side_effect=[_vtpass_http(200, delivered), _vtpass_http(200, plans)]
+        ):
+            requeried = requery_status("202610231200ABCDEF123456")
+            listed = get_service_variations("mtn-data")
+
+        self.assertEqual(requeried["state"], "successful")
+        self.assertTrue(listed["ok"])  # VTpass's misspelled "varations" key still counts
+
+
+class PhoneNumberTests(SimpleTestCase):
+    def test_nigerian_numbers_are_normalised_to_eleven_digits(self):
+        cases = {
+            "0803 123 4567": "08031234567",
+            "+2348031234567": "08031234567",
+            "2348031234567": "08031234567",
+            "23408031234567": "08031234567",
+            "8031234567": "",
+            "12345": "",
+            "201000000000": "201000000000",  # VTpass sandbox test number (sandbox mode only)
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_ng_phone(raw), expected)
+
+
+@override_settings(TRANSACTION_PIN_REQUIRED=False)
+class PurchaseHistoryAndErrorTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="history@example.com", password="StrongPass123")
+        wallet_services.credit_topup(self.user, Decimal("1000.00"), f"SEED-{self.user.id}")
+        self.client.force_authenticate(self.user)
+        other = User.objects.create_user(email="history-other@example.com", password="StrongPass123")
+
+        def txn(user, ref, network, phone, amount, status_):
+            return AirtimeTransaction.objects.create(
+                user=user, client_reference=ref, network=network, phone=phone, amount=Decimal(amount), status=status_
+            )
+
+        txn(self.user, "H-1", "mtn", "08031234567", "100", "successful")
+        txn(self.user, "H-2", "glo", "08051234567", "300", "failed")
+        old = txn(self.user, "H-3", "mtn", "08031234567", "200", "successful")
+        AirtimeTransaction.objects.filter(pk=old.pk).update(timestamp=timezone.now() - timedelta(days=10))
+        txn(other, "H-OTHER", "mtn", "08031234567", "500", "successful")
+
+    def _refs(self, **params):
+        response = self.client.get(reverse("airtime-purchase"), params)
+        return [row["client_reference"] for row in response.data["results"]]
+
+    def test_history_shows_only_the_users_purchases_with_filters(self):
+        since = (timezone.localdate() - timedelta(days=2)).isoformat()
+
+        self.assertEqual(sorted(self._refs()), ["H-1", "H-2", "H-3"])
+        self.assertEqual(sorted(self._refs(status="successful")), ["H-1", "H-3"])
+        self.assertEqual(self._refs(network="glo"), ["H-2"])
+        self.assertEqual(self._refs(search="0805"), ["H-2"])
+        self.assertEqual(sorted(self._refs(date_from=since)), ["H-1", "H-2"])
+        self.assertEqual(self._refs(ordering="-amount")[0], "H-2")
+        self.assertEqual(len(self._refs(page_size=1)), 1)
+
+    def test_variations_are_passed_through(self):
+        url = reverse("service-variations", args=["mtn-data"])
+        with patch("services.views.get_service_variations", return_value={"ok": True, "content": {}}):
+            self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK)
+        with patch("services.views.get_service_variations", return_value={"ok": False, "code": "011"}):
+            self.assertEqual(self.client.get(url).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_an_unexpected_error_keeps_the_money_held_and_hides_the_details(self):
+        with (
+            patch("services.views.purchase_airtime", side_effect=RuntimeError("db password is hunter2")),
+            self.assertLogs("services.views", level="ERROR"),
+        ):
+            response = self.client.post(
+                reverse("airtime-purchase"),
+                {"amount": "300", "network": "mtn", "phone": "08031234567", "client_reference": "CRASH-1"},
+                format="json",
+            )
+
+        txn = AirtimeTransaction.objects.get(client_reference="CRASH-1")
+        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertNotIn("hunter2", response.content.decode())
+        self.assertEqual(txn.status, "pending")
+        self.assertEqual(_ledger_types("airtime:CRASH-1"), ["hold"])
+
+
+class PurchaseAdminTests(TestCase):
+    def test_requery_action_settles_the_purchase_and_moves_the_money(self):
+        staff = User.objects.create_superuser(email="admin-requery@example.com", password="StrongPass123")
+        user = User.objects.create_user(email="buyer@example.com", password="StrongPass123")
+        wallet_services.credit_topup(user, Decimal("1000.00"), "SEED-ADMIN")
+        wallet_services.hold(user, Decimal("300.00"), "airtime:ADM-1")
+        txn = AirtimeTransaction.objects.create(
+            user=user,
+            client_reference="ADM-1",
+            network="mtn",
+            phone="08031234567",
+            amount=Decimal("300"),
+            status="pending",
+            provider_request_id="202610231200ADMIN0000000",
+        )
+        self.client.force_login(staff)
+
+        with patch("services.admin.requery_status", return_value=VTPASS_DELIVERED) as requery:
+            response = self.client.post(
+                reverse("admin:services_airtimetransaction_changelist"),
+                {"action": "admin_requery_status", "_selected_action": [txn.pk]},
+            )
+
+        txn.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(requery.call_args.args[0], "202610231200ADMIN0000000")
+        self.assertEqual(txn.status, "successful")
+        self.assertEqual(_ledger_types("airtime:ADM-1"), ["hold", "capture"])
+
+
+@skipUnless(connection.vendor == "postgresql", "needs real row locks (Postgres)")
+@override_settings(TRANSACTION_PIN_REQUIRED=False)
+class ConcurrentPurchaseTests(APITransactionTestCase):
+    def test_parallel_purchases_cannot_spend_more_than_the_wallet_holds(self):
+        user = User.objects.create_user(email="parallel@example.com", password="StrongPass123")
+        wallet_services.credit_topup(user, Decimal("1000.00"), "SEED-PARALLEL")
+
+        def buy(i):
+            client = APIClient()
+            client.force_authenticate(user)
+            try:
+                return client.post(
+                    reverse("airtime-purchase"),
+                    {"amount": "400", "network": "mtn", "phone": f"0803123456{i}", "client_reference": f"PAR-{i}"},
+                    format="json",
+                ).status_code
+            finally:
+                connection.close()
+
+        with patch("services.views.purchase_airtime", return_value=VTPASS_DELIVERED):
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                codes = list(pool.map(buy, range(6)))
+
+        wallet = Wallet.objects.get(user=user)
+        self.assertEqual(sorted(codes), [201, 201, 400, 400, 400, 400])
+        self.assertEqual((wallet.balance, wallet.locked), (Decimal("200.00"), Decimal("0.00")))
+        call_command("check_wallets", stdout=io.StringIO())

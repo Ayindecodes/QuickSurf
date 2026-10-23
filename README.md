@@ -28,6 +28,30 @@ docker compose run --rm web python manage.py test
 Tests run against Postgres (SQLite ignores the row locks the money code relies on) and never call
 VTpass or Paystack.
 
+## Development
+
+```bash
+pip install -r requirements-dev.txt       # or use the docker compose service
+ruff check . && ruff format .             # lint and format (CI rejects unformatted code)
+coverage run manage.py test && coverage report
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every pull request and every push to `main`:
+- lint and formatting;
+- a check that migrations are up to date;
+- Django's deploy checks against production settings;
+- the tests on Postgres and Redis;
+- coverage of at least 85%, overall and for the money code;
+- `pip-audit`.
+
+Dependabot opens weekly update PRs.
+
+To check a staging deployment end to end (sandbox only: it buys airtime):
+
+```bash
+python scripts/smoke_test.py https://staging.example.com --email you@example.com --password '...' --i-confirm-this-is-sandbox
+```
+
 ## How money moves
 
 Read [docs/adr/0001-wallet-ledger.md](docs/adr/0001-wallet-ledger.md) before changing anything

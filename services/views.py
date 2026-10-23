@@ -1,5 +1,4 @@
 # services/views.py
-import json
 import logging
 import uuid
 from datetime import timedelta
@@ -64,55 +63,14 @@ class SafePaginator(PageNumberPagination):
     max_page_size = 100
 
 
-def _to_plain_dict(maybe_mapping: Any) -> Dict:
-    if isinstance(maybe_mapping, dict):
-        return maybe_mapping
-    if hasattr(maybe_mapping, "items"):
-        return {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in maybe_mapping.items()}
-    if isinstance(maybe_mapping, (bytes, bytearray)):
-        try:
-            return json.loads(maybe_mapping.decode("utf-8"))
-        except Exception:
-            return {}
-    if isinstance(maybe_mapping, str):
-        try:
-            return json.loads(maybe_mapping)
-        except Exception:
-            return {}
-    return {}
+def _to_plain_dict(data: Any) -> Dict:
+    """request.data as a dict (JSON bodies and form posts are both dicts; anything else is empty)."""
+    return data if isinstance(data, dict) else {}
 
 
-def _to_plain_json(maybe_json: Any) -> Dict:
-    if isinstance(maybe_json, dict):
-        return maybe_json
-    try:
-        import requests  # type: ignore
-
-        if isinstance(maybe_json, requests.Response):  # pragma: no cover
-            try:
-                return maybe_json.json()
-            except Exception:
-                return {"raw": maybe_json.text, "http_status": maybe_json.status_code}
-    except Exception:
-        pass
-    if hasattr(maybe_json, "json") and callable(getattr(maybe_json, "json")):
-        try:
-            return maybe_json.json()
-        except Exception:
-            txt = getattr(maybe_json, "text", None)
-            code = getattr(maybe_json, "status_code", None)
-            return {"raw": txt or str(maybe_json), "http_status": code or "unknown"}
-    if isinstance(maybe_json, (bytes, bytearray)):
-        try:
-            return json.loads(maybe_json.decode("utf-8"))
-        except Exception:
-            return {"raw": maybe_json.decode("utf-8", errors="ignore")}
-    if isinstance(maybe_json, str):
-        try:
-            return json.loads(maybe_json)
-        except Exception:
-            return {"raw": maybe_json}
-    return {"raw": str(maybe_json)}
+def _to_plain_json(provider_result: Any) -> Dict:
+    """The VTpass client's result as a dict (it always returns one; anything else is kept as text)."""
+    return provider_result if isinstance(provider_result, dict) else {"raw": str(provider_result)}
 
 
 def _provider_http_status(maybe_resp: Any) -> int:

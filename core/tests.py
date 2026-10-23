@@ -18,6 +18,8 @@ from rest_framework.test import APITestCase
 
 from core.net import client_ip
 from core.privacy import mask_pii
+from notifications.models import EmailLog
+from notifications.utils import send_email
 from payments.models import PaymentIntent
 from services.models import AirtimeTransaction, DataTransaction, ProviderLog
 from users.models import User
@@ -336,3 +338,17 @@ class LogRetentionTests(TestCase):
         call_command("purge_old_logs", "--apply", stdout=io.StringIO())
         self.assertFalse(ProviderLog.objects.filter(pk=old.pk).exists())
         self.assertTrue(ProviderLog.objects.filter(pk=recent.pk).exists())
+
+
+class EmailTests(TestCase):
+    def test_a_failed_send_is_recorded_and_reported(self):
+        with (
+            patch("notifications.utils.send_mail", side_effect=OSError("SMTP server unreachable")),
+            self.assertLogs("notifications.utils", level="ERROR"),
+        ):
+            sent = send_email("ade@example.com", "Hello", "Body")
+
+        log = EmailLog.objects.get(to="ade@example.com")
+        self.assertFalse(sent)
+        self.assertEqual(log.status, "failed")
+        self.assertIn("SMTP server unreachable", log.error)
