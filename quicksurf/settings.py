@@ -1,10 +1,11 @@
-from pathlib import Path
+import logging
 from datetime import timedelta
 from decimal import Decimal
-from decouple import config, Csv
-from django.core.exceptions import ImproperlyConfigured
+from pathlib import Path
+
 import dj_database_url
-import logging
+from decouple import Csv, config
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 

@@ -1,20 +1,24 @@
 # payments/views.py
 import uuid
 from decimal import Decimal
+
 from django.conf import settings
-from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework import serializers as drf_serializers
+from django.views.decorators.csrf import csrf_exempt
 from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
+from rest_framework import status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.throttling import SafeAnonRateThrottle, SafeUserRateThrottle, TopupRateThrottle
+
 from .models import PaymentIntent
+from .paystack import initialize as ps_initialize
+from .paystack import valid_webhook
+from .paystack import verify as ps_verify
 from .serializers import PaymentInitRequestSerializer
-from .paystack import initialize as ps_initialize, verify as ps_verify, valid_webhook
 from .services import (
     FINAL_STATUSES,
     apply_verification,

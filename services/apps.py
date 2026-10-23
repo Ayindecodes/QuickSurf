@@ -6,7 +6,7 @@ from importlib import import_module
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.cache import caches
-from django.core.checks import register, Warning, Error
+from django.core.checks import Error, Warning, register
 
 logger = logging.getLogger(__name__)
 

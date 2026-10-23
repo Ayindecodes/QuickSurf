@@ -3,10 +3,9 @@ import io
 import os
 import subprocess
 import sys
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
-
-from datetime import timedelta
 
 from allauth.mfa.models import Authenticator
 from django.conf import settings

@@ -18,6 +18,7 @@ from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 
 from notifications.utils import send_email
+
 from .models import OneTimeCode, TransactionPin
 
 logger = logging.getLogger(__name__)

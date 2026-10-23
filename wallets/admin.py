@@ -1,6 +1,7 @@
 # wallets/admin.py
 from django.contrib import admin
-from .models import Wallet, Transaction
+
+from .models import Transaction, Wallet
 
 
 @admin.register(Wallet)

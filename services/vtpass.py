@@ -5,7 +5,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Callable, Dict, Optional, Tuple, Any
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 from django.conf import settings

@@ -1,6 +1,9 @@
 # payments/paystack.py
-import hmac, hashlib, requests
-from decimal import Decimal, ROUND_HALF_UP
+import hashlib
+import hmac
+from decimal import ROUND_HALF_UP, Decimal
+
+import requests
 from django.conf import settings
 
 BASE = getattr(settings, "PAYSTACK_BASE_URL", "https://api.paystack.co")
@@ -21,8 +24,10 @@ def initialize(email: str, amount_naira: Decimal, reference: str, metadata=None,
         "amount": kobo(amount_naira),
         "reference": reference,
     }
-    if metadata: payload["metadata"] = metadata
-    if callback_url: payload["callback_url"] = callback_url
+    if metadata:
+        payload["metadata"] = metadata
+    if callback_url:
+        payload["callback_url"] = callback_url
     r = requests.post(f"{BASE}/transaction/initialize", headers=_auth_headers(), json=payload, timeout=TIMEOUT)
     return r.status_code, r.json() if "application/json" in r.headers.get("Content-Type","") else {"raw": r.text, "http_status": r.status_code}
 

@@ -1,16 +1,17 @@
 # services/signals
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal
 from typing import Optional
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models.signals import pre_save, post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
-from rewards.models import LoyaltyLedger
 from notifications.utils import send_receipt_email
+from rewards.models import LoyaltyLedger
+
 from .models import AirtimeTransaction, DataTransaction
 
 # ---------------------------------------------------------------------------
