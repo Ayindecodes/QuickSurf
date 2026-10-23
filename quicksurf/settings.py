@@ -293,6 +293,7 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Airtime/Data purchases with wallet + providers",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    "PREPROCESSING_HOOKS": ["core.schema.canonical_paths_only"],
 }
 
 # -------------------------------------------------------------------

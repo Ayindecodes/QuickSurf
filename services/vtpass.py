@@ -5,12 +5,10 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 from django.conf import settings
-
-from core.privacy import mask_pii
 
 # ============================================================================
 # Configuration: one source of truth in quicksurf/settings.py (PROVIDER_MODE, VTPASS_*)
@@ -75,7 +73,6 @@ def _request(
     timeout: Tuple[int, int] = DEFAULT_TIMEOUT,
     retries: int = MAX_RETRIES,
     resend_safe: bool = True,
-    log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Tuple[int, Dict]:
     """
     Minimal retry loop for transient network errors only; never retries on an HTTP response.
@@ -97,19 +94,7 @@ def _request(
                 params=params,
                 timeout=timeout,
             )
-            parsed = _safe_json(resp)
-            if log_fn:
-                log_fn(
-                    {
-                        "service": "vtpass",
-                        "endpoint": path,
-                        "status_code": resp.status_code,
-                        "request_id": (json or params or {}).get("request_id"),
-                        "request": mask_pii(json or params or {}),
-                        "response": mask_pii(parsed),
-                    }
-                )
-            return resp.status_code, parsed
+            return resp.status_code, _safe_json(resp)
 
         except (
             requests.exceptions.ConnectTimeout,
@@ -120,24 +105,7 @@ def _request(
             if attempt < retries and (resend_safe or isinstance(e, requests.exceptions.ConnectTimeout)):
                 time.sleep(0.8)
                 continue
-            parsed_err = {
-                "code": "999",
-                "response_description": "Network error",
-                "error": str(e),
-                "http_status": 0,
-            }
-            if log_fn:
-                log_fn(
-                    {
-                        "service": "vtpass",
-                        "endpoint": path,
-                        "status_code": 0,
-                        "request_id": (json or params or {}).get("request_id"),
-                        "request": mask_pii(json or params or {}),
-                        "response": mask_pii(parsed_err),
-                    }
-                )
-            return 0, parsed_err
+            return 0, {"code": "999", "response_description": "Network error", "error": str(e), "http_status": 0}
 
     raise RuntimeError(f"Unexpected _request flow. Last error: {last_exc}")
 
@@ -248,17 +216,15 @@ DATA_SERVICE_IDS = {
 # ============================================================================
 # Public API
 # ============================================================================
-def get_service_variations(service_id: str, *, log_fn: Optional[Callable[[Dict], None]] = None) -> Dict:
+def get_service_variations(service_id: str) -> Dict:
     status, body = _request(
         "GET",
         "/service-variations",
         params={"serviceID": service_id},
-        log_fn=log_fn,
     )
     code = str(body.get("code", "")).strip() or str(status)
     content = body.get("content") if isinstance(body, dict) else None
-    variations = content.get("variations") if isinstance(content, dict) else None
-    ok = (status == 200) and (code == "000" or (isinstance(variations, list) and variations))
+    ok = status == 200 and (code == "000" or bool(extract_variations(content)))
     return {
         "ok": ok,
         "code": code,
@@ -276,7 +242,6 @@ def purchase_airtime(
     amount: float | int,
     *,
     request_id: Optional[str] = None,
-    log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
     service_id = AIRTIME_SERVICE_IDS.get((network or "").lower())
     if not service_id:
@@ -290,7 +255,7 @@ def purchase_airtime(
         "phone": str(phone),
     }
 
-    status_code, body = _request("POST", "/pay", json=payload, resend_safe=False, log_fn=log_fn)
+    status_code, body = _request("POST", "/pay", json=payload, resend_safe=False)
     outcome = strict_map_outcome(body if isinstance(body, dict) else {})
 
     return {
@@ -309,7 +274,6 @@ def purchase_data(
     variation_code: str,
     *,
     request_id: Optional[str] = None,
-    log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Dict:
     service_id = DATA_SERVICE_IDS.get((network or "").lower())
     if not service_id:
@@ -324,7 +288,7 @@ def purchase_data(
         "phone": str(phone),
     }
 
-    status_code, body = _request("POST", "/pay", json=payload, resend_safe=False, log_fn=log_fn)
+    status_code, body = _request("POST", "/pay", json=payload, resend_safe=False)
     outcome = strict_map_outcome(body if isinstance(body, dict) else {})
 
     return {
@@ -337,17 +301,12 @@ def purchase_data(
     }
 
 
-def requery_status(
-    request_id: str,
-    *,
-    log_fn: Optional[Callable[[Dict], None]] = None,
-) -> Dict:
+def requery_status(request_id: str) -> Dict:
     # VTpass requery is POST in the official docs
     status_code, body = _request(
         "POST",
         "/requery",
         json={"request_id": request_id},
-        log_fn=log_fn,
     )
 
     outcome = strict_map_outcome(body if isinstance(body, dict) else {})

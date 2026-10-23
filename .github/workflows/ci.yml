@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: quicksurf
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+
+    env:
+      ENV: development
+      PROVIDER_MODE: SANDBOX
+      DATABASE_URL: postgres://postgres:test@localhost:5432/quicksurf
+      REDIS_URL: redis://localhost:6379/0
+      # Nothing in CI may reach VTpass or Paystack.
+      VTPASS_BASE_URL: http://127.0.0.1:9
+      PAYSTACK_BASE_URL: http://127.0.0.1:9
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Formatting
+        run: ruff format --check .
+
+      - name: Migrations are up to date
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Production settings pass Django's deploy checks
+        env:
+          ENV: production
+          SECRET_KEY: ci-only-not-a-real-key-6f1c9a2e8b7d4c3f0a5e9d8c7b6a5f4e3d2c1b0a
+          ALLOWED_HOSTS: api.example.com
+          PROVIDER_MODE: LIVE
+          VTPASS_BASE_URL: https://vtpass.com/api
+          VTPASS_API_KEY: ci
+          VTPASS_PUBLIC_KEY: ci
+          VTPASS_SECRET_KEY: ci
+          PAYSTACK_SECRET_KEY: sk_live_ci_only
+          SECURE_HSTS_PRELOAD: "True"
+        run: python manage.py check --deploy --fail-level WARNING
+
+      - name: Tests (Postgres + Redis)
+        run: coverage run manage.py test --noinput
+
+      - name: Coverage (85% overall, 85% for the money code)
+        run: |
+          coverage report
+          coverage report --skip-covered --fail-under=85 \
+            --include="wallets/services.py,services/settlement.py,services/vtpass.py,services/views.py,payments/services.py,payments/views.py,payments/paystack.py,users/security.py"
+
+      - name: Known vulnerabilities in dependencies
+        run: pip-audit -r requirements.txt
