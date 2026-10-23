@@ -5,6 +5,7 @@ from decimal import Decimal
 from unittest import skipUnless
 
 from django.apps import apps
+from django.contrib.auth.models import Permission
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
@@ -206,13 +207,17 @@ class WalletEndpointTests(APITestCase):
         self.assertEqual(self.client.post("/api/wallet/lock/", {"amount": "500.00"}).status_code, 404)
         self.assertEqual(self.client.post("/api/wallet/unlock/", {"amount": "500.00"}).status_code, 404)
 
-    def test_adjustments_are_staff_only_and_need_a_note(self):
+    def test_adjustments_need_the_adjust_permission_and_a_note(self):
         url = reverse("wallet-adjust")
         payload = {"user": self.user.id, "amount": "-500.00", "note": "Reverse duplicate Paystack credit"}
 
         self.assertEqual(self.client.post(url, payload, format="json").status_code, status.HTTP_403_FORBIDDEN)
 
         staff = User.objects.create_user(email="ops@example.com", password="StrongPass123", is_staff=True)
+        self.client.force_authenticate(staff)
+        self.assertEqual(self.client.post(url, payload, format="json").status_code, status.HTTP_403_FORBIDDEN)
+        staff.user_permissions.add(Permission.objects.get(codename="adjust_wallet"))  # the Finance role
+        staff = User.objects.get(pk=staff.pk)  # reload: permissions are cached on the object
         self.client.force_authenticate(staff)
         no_note = self.client.post(url, {"user": self.user.id, "amount": "-500.00"}, format="json")
         adjusted = self.client.post(url, payload, format="json")

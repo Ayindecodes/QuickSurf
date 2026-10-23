@@ -35,6 +35,7 @@ def _ledger_types(reference):
     return list(Transaction.objects.filter(reference=reference).order_by("id").values_list("type", flat=True))
 
 
+@override_settings(TRANSACTION_PIN_REQUIRED=False)  # about settlement/pricing, not the PIN (see TransactionPinTests)
 class PurchaseSettlementTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="settle@example.com", password="StrongPass123")
@@ -93,6 +94,7 @@ class PurchaseSettlementTests(APITestCase):
         self.assertEqual(mock_purchase_airtime.call_count, 0)
 
 
+@override_settings(TRANSACTION_PIN_REQUIRED=False)  # about settlement/pricing, not the PIN (see TransactionPinTests)
 class AirtimePurchaseTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="service@example.com", password="StrongPass123")
@@ -250,6 +252,7 @@ def _variations_response(prices, key="variations"):
     return {"ok": True, "code": "000", "content": {key: plans}, "http_status": 200}
 
 
+@override_settings(TRANSACTION_PIN_REQUIRED=False)  # about settlement/pricing, not the PIN (see TransactionPinTests)
 class DataPurchaseTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="data@example.com", password="StrongPass123")
@@ -472,6 +475,7 @@ class PurchaseKillSwitchTests(APITestCase):
         self.assertEqual(mock_purchase_data.call_count, 0)
 
 
+@override_settings(TRANSACTION_PIN_REQUIRED=False)  # about settlement/pricing, not the PIN (see TransactionPinTests)
 class RewardAndReceiptSignalTests(APITransactionTestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="signals@example.com", password="StrongPass123")
@@ -576,6 +580,7 @@ class VTpassClientTests(SimpleTestCase):
             self.assertEqual(get_balance(), Decimal("1081.82"))
 
 
+@override_settings(TRANSACTION_PIN_REQUIRED=False)  # about settlement/pricing, not the PIN (see TransactionPinTests)
 class VTpassPurchaseTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="vt@example.com", password="StrongPass123")
@@ -698,6 +703,7 @@ class VTpassPurchaseTests(APITestCase):
         self.assertEqual(_ledger_types("airtime:NOCACHE-1"), ["hold", "capture"])
 
 
+@override_settings(TRANSACTION_PIN_REQUIRED=False)  # about settlement/pricing, not the PIN (see TransactionPinTests)
 class DataPlanCatalogTests(APITestCase):
     def setUp(self):
         cache.clear()

@@ -25,6 +25,9 @@ from rest_framework import serializers as drf_serializers
 from drf_spectacular.utils import extend_schema, inline_serializer
 from drf_spectacular.types import OpenApiTypes
 
+from core.privacy import mask_pii
+from core.throttling import PurchaseRateThrottle, SafeAnonRateThrottle, SafeUserRateThrottle
+from users.security import PinError, check_pin
 from wallets import services as wallet_services
 from wallets.models import Wallet
 from .models import AirtimeTransaction, DataTransaction, ProviderLog
@@ -179,8 +182,8 @@ def _log_provider(user, service_type: str, client_reference: str, request_payloa
             user=user,
             service_type=service_type,
             client_reference=client_reference,
-            request_payload=request_payload,
-            response_payload=response_payload,
+            request_payload=mask_pii(request_payload),  # no PINs, masked phone numbers
+            response_payload=mask_pii(response_payload),
             status_code=_provider_status_code(response_payload, http_status),
         )
     except Exception:
@@ -268,11 +271,20 @@ def _data_plan_price(network: str, variation_code: str) -> Decimal | None:
 
 
 # ---------- Limits & references ----------
-def _daily_limit_exceeded(user, amount: Decimal) -> bool:
-    """True if this purchase would take the user's purchases today (Lagos time) past DAILY_PURCHASE_LIMIT."""
-    limit = settings.DAILY_PURCHASE_LIMIT
+def _daily_limit(user) -> int:
+    """The user's daily purchase limit in naira (0 = none). Accounts under a day old get NEW_ACCOUNT_DAILY_LIMIT."""
+    limits = [settings.DAILY_PURCHASE_LIMIT]
+    if user.date_joined > timezone.now() - timedelta(days=1):
+        limits.append(settings.NEW_ACCOUNT_DAILY_LIMIT)
+    limits = [limit for limit in limits if limit]
+    return min(limits) if limits else 0
+
+
+def _daily_limit_exceeded(user, amount: Decimal) -> int:
+    """The limit this purchase would take the user's purchases today (Lagos time) past, or 0 if it doesn't."""
+    limit = _daily_limit(user)
     if not limit:
-        return False
+        return 0
     start_of_day = timezone.localtime().replace(hour=0, minute=0, second=0, microsecond=0)
     spent = Decimal("0")
     for model in (AirtimeTransaction, DataTransaction):
@@ -280,14 +292,29 @@ def _daily_limit_exceeded(user, amount: Decimal) -> bool:
             user=user, status__in=["pending", "successful"], timestamp__gte=start_of_day
         ).aggregate(total=Sum("amount"))["total"]
         spent += total or 0
-    return spent + amount > limit
+    return limit if spent + amount > limit else 0
 
 
-def _daily_limit_response():
+def _daily_limit_response(limit: int):
     return Response(
-        {"error": f"Daily purchase limit of ₦{settings.DAILY_PURCHASE_LIMIT:,} reached. Try again tomorrow."},
+        {"error": f"Daily purchase limit of ₦{limit:,} reached. Try again tomorrow."},
         status=status.HTTP_400_BAD_REQUEST,
     )
+
+
+def _pin_error_response(user, pin):
+    """None if the transaction PIN is right (or not required); otherwise the 403 to return."""
+    if not settings.TRANSACTION_PIN_REQUIRED:
+        return None
+    try:
+        check_pin(user, str(pin or ""))
+    except PinError as e:
+        return Response({"error": e.message, "code": e.code, **e.extra}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+PURCHASE_THROTTLES = [SafeUserRateThrottle, SafeAnonRateThrottle, PurchaseRateThrottle]
+PURCHASE_ERROR = "Something went wrong with this purchase. If money was held, it will be settled automatically."
 
 
 def _reference_taken_response():
@@ -341,6 +368,7 @@ DetailSchema = inline_serializer(
 )
 class AirtimePurchaseView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = PURCHASE_THROTTLES
 
     def get(self, request):
         qs = apply_txn_filters(AirtimeTransaction.objects.filter(user=request.user), request)
@@ -357,6 +385,9 @@ class AirtimePurchaseView(APIView):
 
         serializer = AirtimePurchaseRequestSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
+        pin_error = _pin_error_response(user, payload.get("pin"))
+        if pin_error:
+            return pin_error
 
         amt = Decimal(str(serializer.validated_data["amount"]))
         network = serializer.validated_data["network"]
@@ -394,8 +425,9 @@ class AirtimePurchaseView(APIView):
                 if again:
                     return Response(AirtimeTransactionSerializer(again).data, status=status.HTTP_200_OK)
 
-                if _daily_limit_exceeded(user, amt):
-                    return _daily_limit_response()
+                exceeded_limit = _daily_limit_exceeded(user, amt)
+                if exceeded_limit:
+                    return _daily_limit_response(exceeded_limit)
                 try:
                     wallet_services.hold(user, amt, ledger_reference("airtime", client_ref))
                 except wallet_services.InsufficientFunds:
@@ -430,7 +462,8 @@ class AirtimePurchaseView(APIView):
 
         except Wallet.DoesNotExist:
             return Response({"error": "Wallet not found."}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
+        except Exception:
+            logger.exception("Purchase %s failed unexpectedly", client_ref)
             # If something blew up before finalize, keep it pending (funds reserved),
             # the requery job or manual requery can reconcile.
             try:
@@ -438,11 +471,11 @@ class AirtimePurchaseView(APIView):
                     txn = AirtimeTransaction.objects.filter(user=user, client_reference=client_ref).first()
                     if txn and txn.status == "pending":
                         if hasattr(txn, "provider_status"):
-                            txn.provider_status = f"ERROR: {str(e)[:60]}"
+                            txn.provider_status = "ERROR: will be rechecked with VTpass"
                         txn.save(update_fields=["provider_status", "updated"])
             except Exception:
                 pass
-            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY)
         finally:
             _release_purchase_locks(k_ref, k_line)
 
@@ -455,6 +488,7 @@ class AirtimePurchaseView(APIView):
 )
 class DataPurchaseView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_classes = PURCHASE_THROTTLES
 
     def get(self, request):
         qs = apply_txn_filters(DataTransaction.objects.filter(user=request.user), request)
@@ -471,6 +505,9 @@ class DataPurchaseView(APIView):
 
         serializer = DataPurchaseRequestSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
+        pin_error = _pin_error_response(user, payload.get("pin"))
+        if pin_error:
+            return pin_error
 
         requested_amt = serializer.validated_data.get("amount")
         network = serializer.validated_data["network"]
@@ -520,8 +557,9 @@ class DataPurchaseView(APIView):
                 if again:
                     return Response(DataTransactionSerializer(again).data, status=status.HTTP_200_OK)
 
-                if _daily_limit_exceeded(user, amt):
-                    return _daily_limit_response()
+                exceeded_limit = _daily_limit_exceeded(user, amt)
+                if exceeded_limit:
+                    return _daily_limit_response(exceeded_limit)
                 try:
                     wallet_services.hold(user, amt, ledger_reference("data", client_ref))
                 except wallet_services.InsufficientFunds:
@@ -555,17 +593,18 @@ class DataPurchaseView(APIView):
 
         except Wallet.DoesNotExist:
             return Response({"error": "Wallet not found."}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
+        except Exception:
+            logger.exception("Purchase %s failed unexpectedly", client_ref)
             try:
                 with transaction.atomic():
                     txn = DataTransaction.objects.filter(user=user, client_reference=client_ref).first()
                     if txn and txn.status == "pending":
                         if hasattr(txn, "provider_status"):
-                            txn.provider_status = f"ERROR: {str(e)[:60]}"
+                            txn.provider_status = "ERROR: will be rechecked with VTpass"
                         txn.save(update_fields=["provider_status", "updated"])
             except Exception:
                 pass
-            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY)
         finally:
             _release_purchase_locks(k_ref, k_line)
 
