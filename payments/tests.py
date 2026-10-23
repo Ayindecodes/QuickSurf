@@ -170,6 +170,15 @@ class PaymentFlowTests(PaymentTestCase):
         self.assertEqual(mock_initialize.call_count, 0)
         self.assertFalse(PaymentIntent.objects.filter(user=self.user).exists())
 
+    @override_settings(TOPUP_MAX_AMOUNT=20000)
+    @patch("payments.views.ps_initialize")
+    def test_init_refuses_more_than_the_top_up_limit(self, mock_initialize):
+        resp = self.client.post(reverse("payments_init"), {"amount": "20000.01"}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("₦20,000", str(resp.data["amount"]))
+        self.assertEqual(mock_initialize.call_count, 0)
+
     @override_settings(TOPUPS_ENABLED=False)
     @patch("payments.views.ps_verify", return_value=_verify_success("PAY-PAUSED-1", 150000))
     def test_verify_still_credits_while_topups_switched_off(self, _mock_verify):

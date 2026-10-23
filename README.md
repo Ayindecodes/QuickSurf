@@ -8,6 +8,19 @@ API docs (when running): `/api/docs/` (Swagger) and `/api/redoc/`. The frontend 
 [docs/API.md](docs/API.md). Use the `/api/v1/` paths: the unversioned `/api/` copies are kept for the
 old frontend.
 
+## Documentation
+
+| Read | For |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the system fits together and how money moves |
+| [docs/adr/](docs/adr/) | Why: the wallet ledger, the versioned API, unclear provider outcomes |
+| [docs/API.md](docs/API.md) | The API for frontend developers |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to make a change safely (money, migrations, security) |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying and configuring production |
+| [docs/LAUNCH.md](docs/LAUNCH.md) | The go-live checklist and soft-launch plan |
+| [docs/runbooks/](docs/runbooks/README.md) | What to do when something goes wrong |
+| [docs/load-testing.md](docs/load-testing.md) | Load test results and how to rerun them |
+
 ## Run it locally
 
 You need Docker.
@@ -133,13 +146,7 @@ Rewards: 1 point per ₦100 spent (`POINTS_PER_NAIRA`), worth `REWARD_POINT_VALU
 Kill switches: set `PURCHASES_ENABLED=False` or `TOPUPS_ENABLED=False` to stop new sales or top-ups
 without a code change. Payments already made are still credited.
 
-## Deploying (Render)
+## Deploying
 
-- **Build command:** `pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate`
-- **Start command:** `gunicorn quicksurf.wsgi:application` (settings come from `gunicorn.conf.py`)
-- **Environment:** see `.env.production.example`. Production refuses to start without `SECRET_KEY`,
-  `DATABASE_URL`, an explicit `PROVIDER_MODE`, the VTpass keys for LIVE, and a live (`sk_live_`)
-  Paystack key.
-- **Callbacks:** set the Paystack webhook to `/api/payments/webhook/` and the VTpass callback to
-  `/api/services/vtpass/callback/`.
-- **After each deploy:** follow `DEPLOYMENT_CHECKLIST.md`.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for Render, Vercel, environment variables, cron jobs and post-deploy checks.
+For the first launch, follow [docs/LAUNCH.md](docs/LAUNCH.md).
