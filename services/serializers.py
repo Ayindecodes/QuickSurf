@@ -134,9 +134,9 @@ class AirtimePurchaseRequestSerializer(serializers.Serializer):
         if v != v.to_integral_value():
             # VTpass airtime is whole naira; a fraction would be charged but never delivered.
             raise serializers.ValidationError("Airtime amount must be whole naira.")
-        # Optional business rule: minimum VTU amount (uncomment if you want)
-        # if v < Decimal("50"):
-        #     raise serializers.ValidationError("Minimum airtime amount is ₦50.")
+        low, high = settings.AIRTIME_MIN_AMOUNT, settings.AIRTIME_MAX_AMOUNT
+        if not low <= v <= high:
+            raise serializers.ValidationError(f"Airtime amount must be between ₦{low:,} and ₦{high:,}.")
         return v
 
     def validate_network(self, v: str):

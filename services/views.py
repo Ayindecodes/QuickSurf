@@ -1,18 +1,22 @@
 # services/views.py
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
+import logging
+import uuid
 from typing import Any, Dict
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.utils.dateparse import parse_date
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 from django.core.cache import cache
 from django.utils import timezone
 from datetime import timedelta
 
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -24,7 +28,7 @@ from drf_spectacular.types import OpenApiTypes
 from wallets import services as wallet_services
 from wallets.models import Wallet
 from .models import AirtimeTransaction, DataTransaction, ProviderLog
-from .settlement import FINAL_STATUSES, ledger_reference, settle_purchase
+from .settlement import FINAL_STATUSES, ledger_reference, purchase_kind, settle_purchase
 from .serializers import (
     AirtimeTransactionSerializer,
     DataTransactionSerializer,
@@ -32,12 +36,23 @@ from .serializers import (
     DataPurchaseRequestSerializer,
 )
 
-from .vtpass import DATA_SERVICE_IDS, extract_variations, purchase_airtime, purchase_data
+from .vtpass import (
+    DATA_SERVICE_IDS,
+    extract_variations,
+    generate_request_id,
+    purchase_airtime,
+    purchase_data,
+    strict_map_outcome,
+    transaction_id,
+)
 try:
     from .vtpass import requery_status, get_service_variations
 except ImportError:
     requery_status = None
     get_service_variations = None
+
+logger = logging.getLogger(__name__)
+TWO_PLACES = Decimal("0.01")
 
 
 # ===================== Helpers =====================
@@ -149,25 +164,6 @@ def _unwrap_provider(payload: Dict) -> Dict:
     return payload
 
 
-def _map_vtpass_outcome(body: Dict) -> str:
-    """
-    Success only when: code=="000" AND content.transactions.status=="delivered".
-    Pending when: transactions.status=="pending" OR code in {"099","016"}.
-    Failed otherwise.
-    """
-    try:
-        code = str(body.get("code", "")).strip()
-        tx = body.get("content", {}).get("transactions", {})
-        tx_status = str(tx.get("status", "")).lower()
-        if code == "000" and tx_status == "delivered":
-            return "successful"
-        if tx_status == "pending" or code in {"099", "016"}:
-            return "pending"
-    except Exception:
-        pass
-    return "failed"
-
-
 def _provider_status_code(provider_body: Dict, http_status: int | None = None) -> str:
     code = provider_body.get("code")
     if code is not None:
@@ -175,17 +171,6 @@ def _provider_status_code(provider_body: Dict, http_status: int | None = None) -
     if http_status is not None:
         return str(http_status)
     return str(provider_body.get("http_status", "unknown"))
-
-
-def _extract_provider_reference(provider_body: Dict, default: str) -> str:
-    tx = provider_body.get("content", {}).get("transactions", {})
-    return (
-        provider_body.get("requestId")
-        or provider_body.get("request_id")
-        or provider_body.get("reference")
-        or tx.get("transactionId")
-        or default
-    )
 
 
 def _log_provider(user, service_type: str, client_reference: str, request_payload: Dict, response_payload: Dict, http_status: int | None = None):
@@ -218,29 +203,95 @@ class PlanPricingUnavailable(Exception):
     """VTpass's plan list couldn't be fetched or read, so the plan can't be priced safely."""
 
 
-def _data_plan_price(network: str, variation_code: str) -> Decimal | None:
-    """
-    Current VTpass price for a data plan. VTpass bills by variation_code, so this,
-    not the client's amount, is what the wallet must be charged.
-    Returns None when the plan doesn't exist for the network.
-    """
+def _vtpass_plans(network: str) -> list:
+    """VTpass's current data plans for a network, as [{"code", "name", "vtpass_price"}]."""
     if get_service_variations is None:
         raise PlanPricingUnavailable()
     res = get_service_variations(DATA_SERVICE_IDS[network]) or {}
-    variations = extract_variations(res.get("content"))
-    if not variations:
+    plans = []
+    for v in extract_variations(res.get("content")):
+        if not isinstance(v, dict) or not v.get("variation_code"):
+            continue
+        try:
+            price = Decimal(str(v.get("variation_amount")))
+        except InvalidOperation:
+            continue
+        if price.is_finite() and price > 0:
+            code = str(v["variation_code"])
+            plans.append({"code": code, "name": str(v.get("name") or code), "vtpass_price": price.quantize(TWO_PLACES)})
+    if not plans:
         raise PlanPricingUnavailable()
+    return plans
 
-    for v in variations:
-        if isinstance(v, dict) and str(v.get("variation_code", "")) == variation_code:
-            try:
-                price = Decimal(str(v.get("variation_amount")))
-            except InvalidOperation:
-                raise PlanPricingUnavailable()
-            if not price.is_finite() or price <= 0:
-                raise PlanPricingUnavailable()
-            return price.quantize(Decimal("0.01"))
+
+def _sell_price(vtpass_price: Decimal) -> Decimal:
+    """What QuickSurf charges for a plan: VTpass's price plus DATA_PRICE_MARKUP_PERCENT."""
+    markup = Decimal(str(settings.DATA_PRICE_MARKUP_PERCENT))
+    return (vtpass_price * (1 + markup / 100)).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
+
+
+def _data_plan_price(network: str, variation_code: str) -> Decimal | None:
+    """
+    QuickSurf's price for a data plan, from VTpass's live plan list. Not cached: VTpass bills by
+    variation_code, so this, not the client's amount, is what the wallet must be charged.
+    Returns None when the plan doesn't exist for the network.
+    """
+    for plan in _vtpass_plans(network):
+        if plan["code"] == variation_code:
+            return _sell_price(plan["vtpass_price"])
     return None
+
+
+# ---------- Limits & references ----------
+def _daily_limit_exceeded(user, amount: Decimal) -> bool:
+    """True if this purchase would take the user's purchases today (Lagos time) past DAILY_PURCHASE_LIMIT."""
+    limit = settings.DAILY_PURCHASE_LIMIT
+    if not limit:
+        return False
+    start_of_day = timezone.localtime().replace(hour=0, minute=0, second=0, microsecond=0)
+    spent = Decimal("0")
+    for model in (AirtimeTransaction, DataTransaction):
+        total = model.objects.filter(
+            user=user, status__in=["pending", "successful"], timestamp__gte=start_of_day
+        ).aggregate(total=Sum("amount"))["total"]
+        spent += total or 0
+    return spent + amount > limit
+
+
+def _daily_limit_response():
+    return Response(
+        {"error": f"Daily purchase limit of ₦{settings.DAILY_PURCHASE_LIMIT:,} reached. Try again tomorrow."},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _reference_taken_response():
+    return Response({"error": "This client_reference is already in use."}, status=status.HTTP_409_CONFLICT)
+
+
+# ---------- Requery ----------
+REQUERY_INTERVAL_SEC = 30
+
+
+def _requery_allowed(txn) -> bool:
+    """At most one VTpass requery per purchase every REQUERY_INTERVAL_SEC (if the cache is down, allow it)."""
+    try:
+        return cache.add(f"requery:{purchase_kind(txn)}:{txn.provider_request_id or txn.pk}", "1", REQUERY_INTERVAL_SEC)
+    except Exception:
+        return True
+
+
+def _refresh_from_vtpass(txn):
+    """Ask VTpass for a purchase's current state (requery) and settle it. Returns the updated purchase."""
+    request_id = txn.provider_request_id or txn.client_reference
+    wrap = _to_plain_json(requery_status(request_id))
+    provider = _unwrap_provider(wrap)
+    _log_provider(txn.user, "vtpass", txn.client_reference, {"action": "requery", "request_id": request_id}, wrap)
+    return settle_purchase(
+        txn, strict_map_outcome(provider),
+        provider_status=str(provider.get("response_description", ""))[:64],
+        provider_reference=transaction_id(provider) or txn.provider_reference,
+    )
 
 
 # ---------- Kill switch ----------
@@ -285,7 +336,7 @@ class AirtimePurchaseView(APIView):
         amt = Decimal(str(serializer.validated_data["amount"]))
         network = serializer.validated_data["network"]
         phone = serializer.validated_data["phone"]
-        client_ref = serializer.validated_data.get("client_reference") or f"AIRTIME_{user.id}_{AirtimeTransaction.objects.filter(user=user).count() + 1}"
+        client_ref = serializer.validated_data.get("client_reference") or f"AIRTIME-{uuid.uuid4().hex}"
 
         # Locks: (1) by client_ref, (2) by user+line for cooldown window
         k_ref = _lock_key_ref(user.id, "airtime", client_ref)
@@ -298,6 +349,8 @@ class AirtimePurchaseView(APIView):
             existing = AirtimeTransaction.objects.filter(user=user, client_reference=client_ref).first()
             if existing:
                 return Response(AirtimeTransactionSerializer(existing).data, status=status.HTTP_200_OK)
+            if AirtimeTransaction.objects.filter(client_reference=client_ref).exists():
+                return _reference_taken_response()
 
             # Also avoid parallel different refs on the same line by returning the most recent pending
             cooloff_after = timezone.now() - timedelta(seconds=COOLDOWN_SEC)
@@ -316,6 +369,8 @@ class AirtimePurchaseView(APIView):
                 if again:
                     return Response(AirtimeTransactionSerializer(again).data, status=status.HTTP_200_OK)
 
+                if _daily_limit_exceeded(user, amt):
+                    return _daily_limit_response()
                 try:
                     wallet_services.hold(user, amt, ledger_reference("airtime", client_ref))
                 except wallet_services.InsufficientFunds:
@@ -328,24 +383,21 @@ class AirtimePurchaseView(APIView):
                     phone=phone,
                     status="pending",   # use only defined choices
                     client_reference=client_ref,
+                    provider_request_id=generate_request_id(),  # the ID VTpass knows it by (requery, callbacks)
                 )
 
             # Provider call (once)
-            raw_resp = purchase_airtime(network, phone, float(amt), request_id=client_ref)
+            raw_resp = purchase_airtime(network, phone, float(amt), request_id=txn.provider_request_id)
             http_status = _provider_http_status(raw_resp)
             wrap = _to_plain_json(raw_resp)
             provider = _unwrap_provider(wrap)
             _log_provider(user, "airtime", client_ref, payload, wrap, http_status=http_status)
 
-            outcome = _map_vtpass_outcome(provider)
-            provider_ref = _extract_provider_reference(provider, default=client_ref)
-            provider_desc = str(provider.get("response_description", ""))[:64]
-
-            # Settle: capture on success, release (refund) on failure, keep held while pending
+            # Settle: capture on success, release (refund) on failure, keep held while unknown
             txn = settle_purchase(
-                txn, outcome,
-                provider_status=provider_desc,
-                provider_request_id=provider_ref,
+                txn, strict_map_outcome(provider),
+                provider_status=str(provider.get("response_description", ""))[:64],
+                provider_reference=transaction_id(provider),
                 raw_response=provider,
             )
 
@@ -400,7 +452,7 @@ class DataPurchaseView(APIView):
         network = serializer.validated_data["network"]
         phone = serializer.validated_data["phone"]
         plan = serializer.validated_data["plan"]
-        client_ref = serializer.validated_data.get("client_reference") or f"DATA_{user.id}_{DataTransaction.objects.filter(user=user).count() + 1}"
+        client_ref = serializer.validated_data.get("client_reference") or f"DATA-{uuid.uuid4().hex}"
 
         k_ref = _lock_key_ref(user.id, "data", client_ref)
         k_line = _lock_key_line(user.id, "data", network, phone)
@@ -411,6 +463,8 @@ class DataPurchaseView(APIView):
             existing = DataTransaction.objects.filter(user=user, client_reference=client_ref).first()
             if existing:
                 return Response(DataTransactionSerializer(existing).data, status=status.HTTP_200_OK)
+            if DataTransaction.objects.filter(client_reference=client_ref).exists():
+                return _reference_taken_response()
 
             cooloff_after = timezone.now() - timedelta(seconds=COOLDOWN_SEC)
             line_pending = DataTransaction.objects.filter(
@@ -442,6 +496,8 @@ class DataPurchaseView(APIView):
                 if again:
                     return Response(DataTransactionSerializer(again).data, status=status.HTTP_200_OK)
 
+                if _daily_limit_exceeded(user, amt):
+                    return _daily_limit_response()
                 try:
                     wallet_services.hold(user, amt, ledger_reference("data", client_ref))
                 except wallet_services.InsufficientFunds:
@@ -455,22 +511,19 @@ class DataPurchaseView(APIView):
                     plan=plan,
                     status="pending",
                     client_reference=client_ref,
+                    provider_request_id=generate_request_id(),  # the ID VTpass knows it by (requery, callbacks)
                 )
 
-            raw_resp = purchase_data(network, phone, plan, request_id=client_ref)
+            raw_resp = purchase_data(network, phone, plan, request_id=txn.provider_request_id)
             http_status = _provider_http_status(raw_resp)
             wrap = _to_plain_json(raw_resp)
             provider = _unwrap_provider(wrap)
             _log_provider(user, "data", client_ref, payload, wrap, http_status=http_status)
 
-            outcome = _map_vtpass_outcome(provider)
-            provider_ref = _extract_provider_reference(provider, default=client_ref)
-            provider_desc = str(provider.get("response_description", ""))[:64]
-
             txn = settle_purchase(
-                txn, outcome,
-                provider_status=provider_desc,
-                provider_request_id=provider_ref,
+                txn, strict_map_outcome(provider),
+                provider_status=str(provider.get("response_description", ""))[:64],
+                provider_reference=transaction_id(provider),
                 raw_response=provider,
             )
 
@@ -512,15 +565,10 @@ class PurchaseStatusView(APIView):
             return Response({"detail": "Transaction not found."}, status=404)
 
         serializer_cls = AirtimeTransactionSerializer if isinstance(txn, AirtimeTransaction) else DataTransactionSerializer
-        if txn.status in FINAL_STATUSES:
+        if txn.status in FINAL_STATUSES or not _requery_allowed(txn):
             return Response(serializer_cls(txn).data)
 
-        wrap = _to_plain_json(requery_status(client_reference))
-        provider = _unwrap_provider(wrap)
-        _log_provider(request.user, "vtpass", client_reference, {"action": "requery"}, wrap)
-
-        outcome = _map_vtpass_outcome(provider)
-        txn = settle_purchase(txn, outcome, provider_status=str(provider.get("response_description", ""))[:64])
+        txn = _refresh_from_vtpass(txn)
         return Response(serializer_cls(txn).data)
 
 
@@ -539,3 +587,73 @@ class ServiceVariationsView(APIView):
         res = get_service_variations(service_id) or {}
         ok = bool(res.get("ok")) or str(res.get("code", "")) == "000"
         return Response(res, status=200 if ok else 400)
+
+
+# ===================== Data plans (with QuickSurf's prices) =====================
+PLANS_CACHE_SEC = 300
+
+
+@extend_schema(
+    description="Data plans for a network (mtn, glo, airtel, 9mobile) at QuickSurf's selling price. Cached for 5 minutes.",
+    responses={200: OpenApiTypes.OBJECT, 404: DetailSchema, 503: DetailSchema},
+)
+class DataPlansView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, network: str):
+        network = network.lower()
+        if network not in DATA_SERVICE_IDS:
+            return Response({"detail": f"Unknown network '{network}'."}, status=status.HTTP_404_NOT_FOUND)
+
+        cache_key = f"data-plans:{network}"
+        try:
+            plans = cache.get(cache_key)
+        except Exception:
+            plans = None
+        if plans is None:
+            try:
+                plans = [
+                    {"code": plan["code"], "name": plan["name"], "price": str(_sell_price(plan["vtpass_price"]))}
+                    for plan in _vtpass_plans(network)
+                ]
+            except PlanPricingUnavailable:
+                return Response({"detail": "Data plans are unavailable right now. Please try again."},
+                                status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            try:
+                cache.set(cache_key, plans, PLANS_CACHE_SEC)
+            except Exception:
+                pass
+        return Response({"network": network, "plans": plans})
+
+
+# ===================== VTpass callback =====================
+def _purchase_by_request_id(request_id: str):
+    return (AirtimeTransaction.objects.filter(provider_request_id=request_id).first()
+            or DataTransaction.objects.filter(provider_request_id=request_id).first())
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class VTPassCallbackView(APIView):
+    """
+    VTpass transaction-update webhook (set its URL in the VTpass dashboard). VTpass doesn't sign
+    these, so the payload is only a hint: the purchase is found by its request ID and VTpass is
+    asked directly (requery) before any money moves. Always acknowledged, because VTpass retries
+    until it gets {"response": "success"}.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = []
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={200: OpenApiTypes.OBJECT})
+    def post(self, request):
+        body = request.data if isinstance(request.data, dict) else {}
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        request_id = str(data.get("requestId") or "")
+        if body.get("type") == "transaction-update" and request_id:
+            txn = _purchase_by_request_id(request_id)
+            if txn is not None:
+                try:
+                    _refresh_from_vtpass(txn)
+                except Exception:
+                    logger.exception("VTpass callback: requery failed for request %s", request_id)
+        return Response({"response": "success"})

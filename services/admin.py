@@ -88,13 +88,13 @@ class AirtimeTransactionAdmin(admin.ModelAdmin):
         updated = 0
         for tx in queryset:
             try:
-                res = requery_status(tx.client_reference)
+                res = requery_status(tx.provider_request_id or tx.client_reference)
                 body = res.get("provider", {}) if isinstance(res, dict) else {}
                 outcome = strict_map_outcome(body)
-                if outcome in FINAL_STATUSES and tx.status not in FINAL_STATUSES:
-                    # Moves the wallet money too (capture or refund), once.
-                    settle_purchase(tx, outcome, provider_status=body.get("response_description") or tx.provider_status)
-                    updated += 1
+                if outcome in FINAL_STATUSES and outcome != tx.status:
+                    # Moves the wallet money too (capture or refund), once; settle_purchase enforces the rules.
+                    settled = settle_purchase(tx, outcome, provider_status=body.get("response_description") or tx.provider_status)
+                    updated += settled.status != tx.status
             except Exception as e:  # pragma: no cover
                 self.message_user(request, f"Error on {tx.client_reference}: {e}", level=messages.ERROR)
         self.message_user(request, f"Requery complete. Updated {updated} transaction(s).", level=messages.INFO)
@@ -161,13 +161,13 @@ class DataTransactionAdmin(admin.ModelAdmin):
         updated = 0
         for tx in queryset:
             try:
-                res = requery_status(tx.client_reference)
+                res = requery_status(tx.provider_request_id or tx.client_reference)
                 body = res.get("provider", {}) if isinstance(res, dict) else {}
                 outcome = strict_map_outcome(body)
-                if outcome in FINAL_STATUSES and tx.status not in FINAL_STATUSES:
-                    # Moves the wallet money too (capture or refund), once.
-                    settle_purchase(tx, outcome, provider_status=body.get("response_description") or tx.provider_status)
-                    updated += 1
+                if outcome in FINAL_STATUSES and outcome != tx.status:
+                    # Moves the wallet money too (capture or refund), once; settle_purchase enforces the rules.
+                    settled = settle_purchase(tx, outcome, provider_status=body.get("response_description") or tx.provider_status)
+                    updated += settled.status != tx.status
             except Exception as e:  # pragma: no cover
                 self.message_user(request, f"Error on {tx.client_reference}: {e}", level=messages.ERROR)
         self.message_user(request, f"Requery complete. Updated {updated} transaction(s).", level=messages.INFO)

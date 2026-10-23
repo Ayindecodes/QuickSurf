@@ -21,6 +21,7 @@ STATUS_CHOICES = [
     ("pending", "Pending"),
     ("successful", "Successful"),
     ("failed", "Failed"),
+    ("reversed", "Reversed"),  # VTpass reversed it and refunded us; the user is refunded too
 ]
 
 NETWORK_CHOICES = [
