@@ -768,6 +768,8 @@ class BeneficiaryListView(generics.ListCreateAPIView):
     pagination_class = None
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # building the API docs: there's no user
+            return Beneficiary.objects.none()
         return Beneficiary.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
@@ -780,6 +782,8 @@ class BeneficiaryDetailView(generics.DestroyAPIView):
     serializer_class = BeneficiarySerializer
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Beneficiary.objects.none()
         return Beneficiary.objects.filter(user=self.request.user)
 
 
