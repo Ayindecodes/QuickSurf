@@ -52,7 +52,10 @@ SECRET_KEY = config("SECRET_KEY", default="")
 if not SECRET_KEY:
     if IS_PRODUCTION:
         raise ImproperlyConfigured("SECRET_KEY is required when ENV is production.")
-    SECRET_KEY = "dev-only-insecure-secret-key"
+    SECRET_KEY = "dev-only-insecure-secret-key-never-use-in-production-0123456789"
+# It signs login tokens and keys PIN/code hashes, so it must be long and random.
+if IS_PRODUCTION and len(SECRET_KEY) < 50:
+    raise ImproperlyConfigured("SECRET_KEY must be at least 50 characters when ENV is production.")
 
 # include Render defaults in case env var not set
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", cast=Csv(), default="localhost,127.0.0.1,.onrender.com,quicksurf.onrender.com")
@@ -80,9 +83,11 @@ INSTALLED_APPS = [
     # Third-party
     "allauth",
     "allauth.account",
+    "allauth.mfa",  # authenticator-app 2FA for staff signing in to the admin
     "rest_framework",
     "rest_framework.authtoken",
     "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "corsheaders",
     "django_filters",
@@ -111,6 +116,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    "core.staff_mfa.StaffMFAMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -215,32 +221,51 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # -------------------------------------------------------------------
 AUTH_USER_MODEL = "users.User"
 ACCOUNT_USER_MODEL_USERNAME_FIELD = "email"
-ACCOUNT_ADAPTER = "users.adapters.NoUsernameAccountAdapter"
+# allauth's pages are only for staff signing in to the admin; customers use the JWT API.
+ACCOUNT_ADAPTER = "users.adapters.StaffOnlyAccountAdapter"
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
     "allauth.account.auth_backends.AuthenticationBackend",
 ]
 ACCOUNT_LOGIN_METHODS = ["email"]
 ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
-ACCOUNT_EMAIL_VERIFICATION = config("ACCOUNT_EMAIL_VERIFICATION", default="mandatory")
+ACCOUNT_EMAIL_VERIFICATION = "none"  # customer emails are verified by the API's code flow
+MFA_SUPPORTED_TYPES = ["totp", "recovery_codes"]
+MFA_TOTP_ISSUER = "QuickSurf"
+
+# Admin lives at /<ADMIN_URL>; use something unguessable in production. Staff must set up an
+# authenticator app before using it when STAFF_MFA_REQUIRED (on by default in production).
+ADMIN_URL = config("ADMIN_URL", default="admin/").strip("/") + "/"
+STAFF_MFA_REQUIRED = env_bool("STAFF_MFA_REQUIRED", default=IS_PRODUCTION)
 
 # -------------------------------------------------------------------
 # Email
 # -------------------------------------------------------------------
 EMAIL_BACKEND = config("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="no-reply@quicksurf.app")
+EMAIL_HOST = config("EMAIL_HOST", default="localhost")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", default=True)
+EMAIL_TIMEOUT = 10
 
 # -------------------------------------------------------------------
 # DRF / Schema / Throttling
 # -------------------------------------------------------------------
 REST_FRAMEWORK = {
+    # Bearer tokens only: no session cookies, so no CSRF exposure from other sites.
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework.authentication.SessionAuthentication",
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+    "DEFAULT_RENDERER_CLASSES": (
+        ("rest_framework.renderers.JSONRenderer", "rest_framework.renderers.BrowsableAPIRenderer")
+        if DEBUG else ("rest_framework.renderers.JSONRenderer",)
+    ),
+    "EXCEPTION_HANDLER": "core.exceptions.api_exception_handler",
     "DEFAULT_THROTTLE_CLASSES": [
         "core.throttling.SafeUserRateThrottle",
         "core.throttling.SafeAnonRateThrottle",
@@ -248,6 +273,15 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "user": config("DRF_USER_THROTTLE", default="1000/day"),
         "anon": config("DRF_ANON_THROTTLE", default="100/day"),
+        # Per IP (core.net.client_ip) unless noted
+        "login": "20/minute",
+        "login_email": "10/hour",       # per email address
+        "register": "20/hour",
+        "password_reset": "10/hour",
+        "verify_email": "10/hour",
+        "pin_change": "10/hour",
+        "purchase": config("PURCHASE_RATE", default="30/hour"),  # per user
+        "topup": config("TOPUP_RATE", default="20/hour"),        # per user
     },
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
@@ -270,9 +304,12 @@ SPECTACULAR_SETTINGS = {
 # JWT
 # -------------------------------------------------------------------
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=4),  # 4 hours
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=config("JWT_ACCESS_MINUTES", default=60, cast=int)),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=config("JWT_REFRESH_DAYS", default=1, cast=int)),
     "AUTH_HEADER_TYPES": ("Bearer",),
+    # Each refresh returns a new refresh token and revokes the old one, so a stolen one stops working.
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
 
 # -------------------------------------------------------------------
@@ -291,10 +328,9 @@ if FRONTEND_URL:
     if FRONTEND_URL not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS = [*CSRF_TRUSTED_ORIGINS, FRONTEND_URL]
 
-# Helpful for Render preview/alias domains (https only).
-CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://.*\.onrender\.com$"]
-
-CORS_ALLOW_CREDENTIALS = True
+# Exact origins only: a pattern like *.onrender.com would trust anyone's Render app.
+# Auth is a Bearer header, so browsers never need to send cookies cross-origin.
+CORS_ALLOW_CREDENTIALS = False
 CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
 
 # -------------------------------------------------------------------
@@ -319,9 +355,9 @@ X_FRAME_OPTIONS = "DENY"
 REFERRER_POLICY = "same-origin"
 
 # -------------------------------------------------------------------
-# Login redirects (only used if you serve Django templates)
+# Login redirects (staff signing in through allauth go to the admin)
 # -------------------------------------------------------------------
-LOGIN_REDIRECT_URL = "/dashboard/"
+LOGIN_REDIRECT_URL = f"/{ADMIN_URL}"
 ACCOUNT_LOGOUT_REDIRECT_URL = "/accounts/login/"
 
 # -------------------------------------------------------------------
@@ -381,6 +417,12 @@ TOPUPS_ENABLED = env_bool("TOPUPS_ENABLED", default=True)
 AIRTIME_MIN_AMOUNT = config("AIRTIME_MIN_AMOUNT", default=50, cast=int)
 AIRTIME_MAX_AMOUNT = config("AIRTIME_MAX_AMOUNT", default=50000, cast=int)
 DAILY_PURCHASE_LIMIT = config("DAILY_PURCHASE_LIMIT", default=200000, cast=int)
+# Accounts less than a day old get a lower daily limit (0 = same as everyone).
+NEW_ACCOUNT_DAILY_LIMIT = config("NEW_ACCOUNT_DAILY_LIMIT", default=20000, cast=int)
+
+# Purchases need the user's 4-digit transaction PIN. Turn off only while a frontend without a
+# PIN screen is still live.
+TRANSACTION_PIN_REQUIRED = env_bool("TRANSACTION_PIN_REQUIRED", default=True)
 
 # Data plans are sold at VTpass's price plus this percentage (0 = sell at VTpass's price).
 DATA_PRICE_MARKUP_PERCENT = config("DATA_PRICE_MARKUP_PERCENT", default="0", cast=Decimal)
