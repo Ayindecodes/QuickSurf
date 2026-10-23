@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import timedelta
+from decimal import Decimal
 from decouple import config, Csv
 from django.core.exceptions import ImproperlyConfigured
 import dj_database_url
@@ -361,6 +362,14 @@ ALLOW_PROVIDER_DIRECT_CHARGE = env_bool("ALLOW_PROVIDER_DIRECT_CHARGE", default=
 # Payment verify and the Paystack webhook stay on, so payments already made are still credited.
 PURCHASES_ENABLED = env_bool("PURCHASES_ENABLED", default=True)
 TOPUPS_ENABLED = env_bool("TOPUPS_ENABLED", default=True)
+
+# Purchase limits in naira. DAILY_PURCHASE_LIMIT is per user per day (Lagos time); 0 turns it off.
+AIRTIME_MIN_AMOUNT = config("AIRTIME_MIN_AMOUNT", default=50, cast=int)
+AIRTIME_MAX_AMOUNT = config("AIRTIME_MAX_AMOUNT", default=50000, cast=int)
+DAILY_PURCHASE_LIMIT = config("DAILY_PURCHASE_LIMIT", default=200000, cast=int)
+
+# Data plans are sold at VTpass's price plus this percentage (0 = sell at VTpass's price).
+DATA_PRICE_MARKUP_PERCENT = config("DATA_PRICE_MARKUP_PERCENT", default="0", cast=Decimal)
 
 # -------------------------------------------------------------------
 # Logging
