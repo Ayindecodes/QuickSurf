@@ -84,7 +84,8 @@ class DataTransaction(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="data_txns")
     network = models.CharField(max_length=10, choices=NETWORK_CHOICES)
     phone = models.CharField(max_length=15, validators=[PHONE_VALIDATOR])
-    plan = models.CharField(max_length=50)  # e.g. 1GB, 2GB, etc
+    plan = models.CharField(max_length=50)  # VTpass variation_code, e.g. mtn-10mb-100
+    plan_name = models.CharField(max_length=120, blank=True)  # the plan's name when bought, e.g. "MTN 1GB - 30 days"
     amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(1)])
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="initiated")
@@ -123,6 +124,11 @@ class DataTransaction(models.Model):
 
     def __str__(self):
         return f"{self.user.email} | {self.network} | {self.plan} | ₦{self.amount} | {self.status}"
+
+    @property
+    def item(self) -> str:
+        """What was bought, for receipts and history: "Data MTN 1GB - 30 days" (or the plan code for old purchases)."""
+        return f"Data {self.plan_name or self.plan}"
 
 
 # ---------------------------------------------------------------------------

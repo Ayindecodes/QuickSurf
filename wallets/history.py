@@ -83,7 +83,7 @@ def _description(row, purchase) -> str:
         return "Opening balance"
     if purchase is None:
         return "Purchase"
-    item = f"Data {purchase.plan}" if isinstance(purchase, DataTransaction) else "Airtime"
+    item = purchase.item if isinstance(purchase, DataTransaction) else "Airtime"
     what = f"{item} for {purchase.phone} ({purchase.network.upper()})"
     if row.type == Transaction.TYPE_RELEASE:
         return f"Refund: {what}"

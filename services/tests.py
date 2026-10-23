@@ -278,7 +278,9 @@ DATA_DELIVERED = {
 
 def _variations_response(prices, key="variations"):
     """Shape returned by services.vtpass.get_service_variations."""
-    plans = [{"variation_code": code, "variation_amount": amount} for code, amount in prices.items()]
+    plans = [
+        {"variation_code": code, "name": f"Plan {code}", "variation_amount": amount} for code, amount in prices.items()
+    ]
     return {"ok": True, "code": "000", "content": {key: plans}, "http_status": 200}
 
 
@@ -341,6 +343,12 @@ class DataPurchaseTests(APITestCase):
         self.assertEqual(txn.amount, Decimal("1200.00"))
         self.assertEqual(self.wallet.balance, Decimal("1800.00"))
         self.assertEqual(_ledger_types("data:DATA-NOAMT-001"), ["hold", "capture"])
+        # The plan's name is kept, so receipts and history read "Data Plan mtn-1gb", not just the code.
+        self.assertEqual(response.data["plan_name"], "Plan mtn-1gb")
+        receipt = self.client.get(reverse("purchase-receipt", args=["DATA-NOAMT-001"]))
+        history = self.client.get(reverse("wallet-history"), {"kind": "purchase"})
+        self.assertEqual(receipt.data["item"], "Data Plan mtn-1gb")
+        self.assertEqual(history.data["results"][0]["description"], "Data Plan mtn-1gb for 08031234567 (MTN)")
 
     @patch("services.views.purchase_data", return_value=DATA_DELIVERED)
     def test_data_purchase_reads_misspelled_varations_key(self, _mock_purchase_data):
