@@ -167,7 +167,8 @@ class AirtimePurchaseRequestSerializer(serializers.Serializer):
 
 
 class DataPurchaseRequestSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    # Optional: the price comes from VTpass; if sent, it must match that price.
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     network = serializers.CharField()
     phone = serializers.CharField()
     plan = serializers.CharField()

@@ -351,6 +351,11 @@ RECEIPT_EMAILS_ENABLED = env_bool("RECEIPT_EMAILS_ENABLED", default=True)
 # >>> NEW: allow LIVE tests even if internal wallet is 0.00
 ALLOW_PROVIDER_DIRECT_CHARGE = env_bool("ALLOW_PROVIDER_DIRECT_CHARGE", default=False)
 
+# Kill switches: set to False on Render to stop new purchases or top-ups without a code change.
+# Payment verify and the Paystack webhook stay on, so payments already made are still credited.
+PURCHASES_ENABLED = env_bool("PURCHASES_ENABLED", default=True)
+TOPUPS_ENABLED = env_bool("TOPUPS_ENABLED", default=True)
+
 # -------------------------------------------------------------------
 # Logging
 # -------------------------------------------------------------------
@@ -373,4 +378,4 @@ LOGGING = {
 
 # >>> NEW: print a clear boot line so you can verify LIVE mode in Render logs
 logger = logging.getLogger(__name__)
-logger.warning(f"BOOT ENV={ENV} DEBUG={DEBUG} PROVIDER_MODE={PROVIDER_MODE} VTPASS_BASE_URL={VTPASS_BASE_URL} DIRECT_CHARGE={ALLOW_PROVIDER_DIRECT_CHARGE}")
+logger.warning(f"BOOT ENV={ENV} DEBUG={DEBUG} PROVIDER_MODE={PROVIDER_MODE} VTPASS_BASE_URL={VTPASS_BASE_URL} DIRECT_CHARGE={ALLOW_PROVIDER_DIRECT_CHARGE} PURCHASES_ENABLED={PURCHASES_ENABLED} TOPUPS_ENABLED={TOPUPS_ENABLED}")

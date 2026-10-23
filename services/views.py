@@ -1,8 +1,9 @@
 # services/views.py
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import json
 from typing import Any, Dict
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils.dateparse import parse_date
@@ -29,7 +30,7 @@ from .serializers import (
     DataPurchaseRequestSerializer,
 )
 
-from .vtpass import purchase_airtime, purchase_data
+from .vtpass import DATA_SERVICE_IDS, extract_variations, purchase_airtime, purchase_data
 try:
     from .vtpass import requery_status, get_service_variations
 except ImportError:
@@ -210,6 +211,44 @@ def _lock_key_line(user_id, service, network, phone):
     return f"lock:{service}:line:{user_id}:{network}:{phone}"
 
 
+# ---------- Data plan pricing ----------
+class PlanPricingUnavailable(Exception):
+    """VTpass's plan list couldn't be fetched or read, so the plan can't be priced safely."""
+
+
+def _data_plan_price(network: str, variation_code: str) -> Decimal | None:
+    """
+    Current VTpass price for a data plan. VTpass bills by variation_code, so this,
+    not the client's amount, is what the wallet must be charged.
+    Returns None when the plan doesn't exist for the network.
+    """
+    if get_service_variations is None:
+        raise PlanPricingUnavailable()
+    res = get_service_variations(DATA_SERVICE_IDS[network]) or {}
+    variations = extract_variations(res.get("content"))
+    if not variations:
+        raise PlanPricingUnavailable()
+
+    for v in variations:
+        if isinstance(v, dict) and str(v.get("variation_code", "")) == variation_code:
+            try:
+                price = Decimal(str(v.get("variation_amount")))
+            except InvalidOperation:
+                raise PlanPricingUnavailable()
+            if not price.is_finite() or price <= 0:
+                raise PlanPricingUnavailable()
+            return price.quantize(Decimal("0.01"))
+    return None
+
+
+# ---------- Kill switch ----------
+def _purchases_paused_response():
+    return Response(
+        {"error": "Purchases are temporarily unavailable. Please try again later."},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
 DetailSchema = inline_serializer(
     name="ServiceDetailResponse",
     fields={"detail": drf_serializers.CharField()},
@@ -232,6 +271,9 @@ class AirtimePurchaseView(APIView):
         return paginator.get_paginated_response(AirtimeTransactionSerializer(page, many=True).data)
 
     def post(self, request):
+        if not settings.PURCHASES_ENABLED:
+            return _purchases_paused_response()
+
         user = request.user
         payload = _to_plain_dict(request.data)
 
@@ -376,13 +418,16 @@ class DataPurchaseView(APIView):
         return paginator.get_paginated_response(DataTransactionSerializer(page, many=True).data)
 
     def post(self, request):
+        if not settings.PURCHASES_ENABLED:
+            return _purchases_paused_response()
+
         user = request.user
         payload = _to_plain_dict(request.data)
 
         serializer = DataPurchaseRequestSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
 
-        amt = Decimal(str(serializer.validated_data["amount"]))
+        requested_amt = serializer.validated_data.get("amount")
         network = serializer.validated_data["network"]
         phone = serializer.validated_data["phone"]
         plan = serializer.validated_data["plan"]
@@ -404,6 +449,22 @@ class DataPurchaseView(APIView):
             ).order_by("-timestamp").first()
             if line_pending:
                 return Response(DataTransactionSerializer(line_pending).data, status=status.HTTP_200_OK)
+
+            # Price comes from VTpass, never from the client; a client amount only confirms the price shown.
+            try:
+                amt = _data_plan_price(network, plan)
+            except PlanPricingUnavailable:
+                return Response(
+                    {"error": "Unable to price this data plan right now. Please try again."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            if amt is None:
+                return Response({"error": f"Unknown data plan '{plan}' for {network}."}, status=status.HTTP_400_BAD_REQUEST)
+            if requested_amt is not None and Decimal(str(requested_amt)) != amt:
+                return Response(
+                    {"error": "Amount does not match the current price for this plan.", "price": str(amt)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             with transaction.atomic():
                 wallet = Wallet.objects.select_for_update().get(user=user)
