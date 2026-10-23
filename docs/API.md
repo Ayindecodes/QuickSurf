@@ -42,17 +42,20 @@ Codes you will meet:
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 400 | `invalid` | Field errors (see `fields`), or a rule such as the daily limit (see `message`) |
+| 400 | `invalid` | Field errors (see `fields`) |
+| 400 | `insufficient_funds`, `daily_limit` | The balance is too low; the daily purchase limit is reached |
+| 400 | `price_changed`, `unknown_plan` | The data plan's price changed (the new one is in `price`); the plan no longer exists |
 | 400 | `redemption_refused`, `invalid_range` | See Rewards and History |
 | 401 | `not_authenticated`, `authentication_failed`, `token_not_valid` | Refresh the access token, or sign in again |
 | 403 | `email_unverified` | The email must be verified before the first top-up |
 | 403 | `pin_not_set`, `pin_invalid`, `pin_locked` | See PIN |
 | 403 | `permission_denied` | Not allowed |
 | 404 | `not_found` | Unknown purchase, reference or plan |
-| 409 | `conflict`, `account_not_empty` | Reference already used; account still holds money |
-| 429 | `throttled` | Too many requests. Wait and retry |
+| 409 | `reference_in_use`, `account_not_empty` | The `client_reference` belongs to another purchase; the account still holds money |
+| 429 | `throttled`, `purchase_in_progress` | Too many requests; a purchase for this number is already going through. Wait and retry |
 | 500 | `server_error` | Our fault. Show the `request_id` |
-| 502/503 | `provider_error`, `unavailable` | VTpass or Paystack trouble, or sales paused. Retry later |
+| 502/503 | `provider_error`, `unavailable`, `plans_unavailable` | VTpass or Paystack trouble. Retry later |
+| 503 | `purchases_paused`, `topups_paused` | Sales or top-ups are switched off for now |
 
 ## Accounts
 

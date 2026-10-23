@@ -222,6 +222,7 @@ class AirtimePurchaseTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Insufficient funds.")
+        self.assertEqual(response.data["code"], "insufficient_funds")
         self.assertFalse(AirtimeTransaction.objects.filter(client_reference="AIR-NOFUNDS-001").exists())
         self.assertEqual(self.wallet.balance, Decimal("5000.00"))
         self.assertEqual(mock_purchase_airtime.call_count, 0)
@@ -315,6 +316,7 @@ class DataPurchaseTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["price"], "1200.00")
+        self.assertEqual(response.data["code"], "price_changed")
         self.assertFalse(DataTransaction.objects.filter(client_reference="DATA-CHEAP-001").exists())
         self.assertEqual(self.wallet.balance, Decimal("3000.00"))
         self.assertEqual(mock_purchase_data.call_count, 0)
@@ -751,6 +753,7 @@ class VTpassPurchaseTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
         self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Daily purchase limit", second.data["error"])
+        self.assertEqual(second.data["code"], "daily_limit")
         self.assertEqual(self._wallet(), (Decimal("700.00"), Decimal("0.00")))
 
     @override_settings(AIRTIME_MIN_AMOUNT=50, AIRTIME_MAX_AMOUNT=500)
