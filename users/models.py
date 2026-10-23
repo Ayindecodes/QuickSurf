@@ -14,7 +14,7 @@ class UserManager(BaseUserManager):
         if not email:
             raise ValueError("Email is required")
         email = self.normalize_email(email)
-        user  = self.model(email=email, **extra_fields)
+        user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
         return user
@@ -32,11 +32,11 @@ class UserManager(BaseUserManager):
 
 class User(AbstractUser):
     username = None
-    email    = models.EmailField(unique=True)
+    email = models.EmailField(unique=True)
     # Set when the user enters a code we emailed them. Needed before topping up.
     email_verified_at = models.DateTimeField(null=True, blank=True)
 
-    USERNAME_FIELD  = 'email'
+    USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
 
     objects = UserManager()
@@ -51,6 +51,7 @@ class TransactionPin(models.Model):
     4-digit PIN needed to buy airtime/data. Stored as a keyed hash (see users/security.py), and
     locked for LOCK_MINUTES after MAX_ATTEMPTS wrong tries in a row.
     """
+
     MAX_ATTEMPTS = 5
     LOCK_MINUTES = 30
 
@@ -63,6 +64,7 @@ class TransactionPin(models.Model):
 
 class OneTimeCode(models.Model):
     """A short-lived 6-digit code emailed to a user. Only a keyed hash of the code is stored."""
+
     PURPOSE_VERIFY_EMAIL = "verify_email"
     PURPOSE_RESET_PASSWORD = "reset_password"
     PURPOSES = [

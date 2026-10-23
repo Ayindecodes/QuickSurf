@@ -20,8 +20,11 @@ def mask_value(value) -> str:
 def mask_pii(data):
     """A copy of data with phone numbers and emails masked and PINs/passwords removed."""
     if isinstance(data, dict):
-        return {key: (mask_value(value) if key in MASKED_KEYS else mask_pii(value))
-                for key, value in data.items() if key not in DROPPED_KEYS}
+        return {
+            key: (mask_value(value) if key in MASKED_KEYS else mask_pii(value))
+            for key, value in data.items()
+            if key not in DROPPED_KEYS
+        }
     if isinstance(data, list):
         return [mask_pii(item) for item in data]
     return data

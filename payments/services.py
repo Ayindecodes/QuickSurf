@@ -3,6 +3,7 @@
 Paystack payment handling shared by the verify endpoint, the webhook, the admin and the
 verify_pending_topups command. Wallet money itself only moves through wallets.services.
 """
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -16,8 +17,18 @@ from .paystack import kobo
 FINAL_STATUSES = ("success", "review")
 
 # Paystack fields worth keeping; card authorization, customer details and logs are dropped.
-KEPT_DATA_FIELDS = ("id", "status", "reference", "amount", "currency", "paid_at", "created_at",
-                    "channel", "gateway_response", "fees")
+KEPT_DATA_FIELDS = (
+    "id",
+    "status",
+    "reference",
+    "amount",
+    "currency",
+    "paid_at",
+    "created_at",
+    "channel",
+    "gateway_response",
+    "fees",
+)
 
 
 def trim_payload(body):

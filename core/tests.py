@@ -25,8 +25,9 @@ from wallets import services as wallet_services
 from wallets.models import Wallet
 
 PHONE = "08031234567"
-REDIS_THAT_IS_DOWN = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache",
-                                  "LOCATION": "redis://127.0.0.1:9/0"}}
+REDIS_THAT_IS_DOWN = {
+    "default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": "redis://127.0.0.1:9/0"}
+}
 
 
 def _audit_rows():
@@ -49,10 +50,22 @@ class AuditMoneyTests(TestCase):
 
     def test_wallet_that_matches_its_history_is_not_flagged(self):
         PaymentIntent.objects.create(user=self.user, amount=Decimal("1000.00"), reference="A-1", status="success")
-        AirtimeTransaction.objects.create(user=self.user, network="mtn", phone=PHONE, amount=Decimal("300.00"),
-                                          status="successful", client_reference="AIR-A-1")
-        AirtimeTransaction.objects.create(user=self.user, network="mtn", phone=PHONE, amount=Decimal("200.00"),
-                                          status="pending", client_reference="AIR-A-2")
+        AirtimeTransaction.objects.create(
+            user=self.user,
+            network="mtn",
+            phone=PHONE,
+            amount=Decimal("300.00"),
+            status="successful",
+            client_reference="AIR-A-1",
+        )
+        AirtimeTransaction.objects.create(
+            user=self.user,
+            network="mtn",
+            phone=PHONE,
+            amount=Decimal("200.00"),
+            status="pending",
+            client_reference="AIR-A-2",
+        )
         self._set_wallet("500.00", locked="200.00")
 
         self.assertEqual(_section(_audit_rows(), "wallet_mismatch"), [])
@@ -68,8 +81,13 @@ class AuditMoneyTests(TestCase):
 
     def test_data_purchase_charged_below_vtpass_amount_is_flagged(self):
         DataTransaction.objects.create(
-            user=self.user, network="mtn", phone=PHONE, plan="mtn-1gb", amount=Decimal("1.00"),
-            status="successful", client_reference="DATA-A-1",
+            user=self.user,
+            network="mtn",
+            phone=PHONE,
+            plan="mtn-1gb",
+            amount=Decimal("1.00"),
+            status="successful",
+            client_reference="DATA-A-1",
             raw_response={"code": "000", "content": {"transactions": {"status": "delivered", "amount": 1200}}},
         )
 
@@ -83,9 +101,14 @@ class AuditMoneyTests(TestCase):
         success = {"status": True, "data": {"status": "success", "currency": "NGN"}}
         gateway_error = {"raw": "<html>Bad gateway</html>", "http_status": 502}
         for status_code, body in (("200", success), ("502", gateway_error), ("200", success)):
-            ProviderLog.objects.create(service_type="paystack", client_reference="PAY-A-1",
-                                       endpoint="/transaction/verify", status_code=status_code,
-                                       request_payload={}, response_payload=body)
+            ProviderLog.objects.create(
+                service_type="paystack",
+                client_reference="PAY-A-1",
+                endpoint="/transaction/verify",
+                status_code=status_code,
+                request_payload={},
+                response_payload=body,
+            )
 
         [row] = _section(_audit_rows(), "paystack_multi_credit")
 
@@ -93,12 +116,24 @@ class AuditMoneyTests(TestCase):
         self.assertEqual(Decimal(row["difference"]), Decimal("1500.00"))
 
     def test_refund_after_network_error_is_flagged_and_failures_are_grouped_by_code(self):
-        AirtimeTransaction.objects.create(user=self.user, network="mtn", phone=PHONE, amount=Decimal("500.00"),
-                                          status="failed", client_reference="AIR-A-3",
-                                          raw_response={"code": "999", "response_description": "Network error"})
-        AirtimeTransaction.objects.create(user=self.user, network="mtn", phone=PHONE, amount=Decimal("100.00"),
-                                          status="failed", client_reference="AIR-A-4",
-                                          raw_response={"code": "011", "response_description": "INVALID ARGUMENTS"})
+        AirtimeTransaction.objects.create(
+            user=self.user,
+            network="mtn",
+            phone=PHONE,
+            amount=Decimal("500.00"),
+            status="failed",
+            client_reference="AIR-A-3",
+            raw_response={"code": "999", "response_description": "Network error"},
+        )
+        AirtimeTransaction.objects.create(
+            user=self.user,
+            network="mtn",
+            phone=PHONE,
+            amount=Decimal("100.00"),
+            status="failed",
+            client_reference="AIR-A-4",
+            raw_response={"code": "011", "response_description": "INVALID ARGUMENTS"},
+        )
 
         rows = _audit_rows()
         [refund] = _section(rows, "unknown_outcome_refund")
@@ -110,8 +145,14 @@ class AuditMoneyTests(TestCase):
     def test_requery_pending_refund_also_frees_the_locked_money(self):
         wallet_services.credit_topup(self.user, Decimal("1000.00"), "PAY-RQ-1")
         wallet_services.hold(self.user, Decimal("300.00"), "airtime:RQ-1")
-        txn = AirtimeTransaction.objects.create(user=self.user, network="mtn", phone=PHONE, amount=Decimal("300.00"),
-                                                status="pending", client_reference="RQ-1")
+        txn = AirtimeTransaction.objects.create(
+            user=self.user,
+            network="mtn",
+            phone=PHONE,
+            amount=Decimal("300.00"),
+            status="pending",
+            client_reference="RQ-1",
+        )
         failed = {"provider": {"code": "011", "content": {"transactions": {"status": "failed"}}}}
 
         with patch("core.management.commands.requery_pending.requery_status", return_value=failed):
@@ -148,16 +189,27 @@ class ProductionSettingsTests(SimpleTestCase):
     """Production must refuse to start with settings that would lose money or data."""
 
     SAFE_LIVE = {
-        "ENV": "production", "SECRET_KEY": "x" * 50, "DATABASE_URL": "postgres://u:p@db.example.com:5432/quicksurf",
-        "PAYSTACK_SECRET_KEY": "sk_live_123", "PROVIDER_MODE": "LIVE", "VTPASS_BASE_URL": "https://vtpass.com/api",
-        "VTPASS_API_KEY": "a", "VTPASS_PUBLIC_KEY": "b", "VTPASS_SECRET_KEY": "c",
+        "ENV": "production",
+        "SECRET_KEY": "x" * 50,
+        "DATABASE_URL": "postgres://u:p@db.example.com:5432/quicksurf",
+        "PAYSTACK_SECRET_KEY": "sk_live_123",
+        "PROVIDER_MODE": "LIVE",
+        "VTPASS_BASE_URL": "https://vtpass.com/api",
+        "VTPASS_API_KEY": "a",
+        "VTPASS_PUBLIC_KEY": "b",
+        "VTPASS_SECRET_KEY": "c",
     }
 
     def _boot(self, **changes):
         # Blank values (not missing ones): python-decouple would fall back to a developer's .env file.
         env = {**os.environ, **self.SAFE_LIVE, **changes}
-        return subprocess.run([sys.executable, "-c", "import quicksurf.settings"], cwd=settings.BASE_DIR,
-                              env=env, capture_output=True, text=True)
+        return subprocess.run(
+            [sys.executable, "-c", "import quicksurf.settings"],
+            cwd=settings.BASE_DIR,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
 
     def test_a_complete_live_configuration_starts(self):
         result = self._boot()
@@ -184,8 +236,10 @@ class ProductionSettingsTests(SimpleTestCase):
         self.assertIn("DATABASE_URL is required", result.stderr)
 
 
-PLAIN_STATIC = {"default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-                "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}
+PLAIN_STATIC = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
 
 
 class RequestSafetyTests(APITestCase):
@@ -200,8 +254,10 @@ class RequestSafetyTests(APITestCase):
     def test_unexpected_errors_return_json_without_internal_details(self):
         self.client.force_authenticate(User.objects.create_user(email="err@example.com", password="Pass-Phrase-9"))
 
-        with patch("wallets.views.Wallet.objects.get", side_effect=RuntimeError("db password is hunter2")), \
-             self.assertLogs("core.exceptions", level="ERROR"):
+        with (
+            patch("wallets.views.Wallet.objects.get", side_effect=RuntimeError("db password is hunter2")),
+            self.assertLogs("core.exceptions", level="ERROR"),
+        ):
             response = self.client.get(reverse("wallet-balance"))
 
         self.assertEqual(response.status_code, 500)
@@ -209,11 +265,17 @@ class RequestSafetyTests(APITestCase):
         self.assertNotIn("hunter2", response.content.decode())
 
     def test_logs_get_masked_phone_numbers_and_no_secrets(self):
-        masked = mask_pii({"phone": "08031234567", "pin": "2580",
-                           "data": [{"email": "ade@example.com", "unique_element": "08031234567"}]})
+        masked = mask_pii(
+            {
+                "phone": "08031234567",
+                "pin": "2580",
+                "data": [{"email": "ade@example.com", "unique_element": "08031234567"}],
+            }
+        )
 
-        self.assertEqual(masked, {"phone": "080***4567",
-                                  "data": [{"email": "ad***@example.com", "unique_element": "080***4567"}]})
+        self.assertEqual(
+            masked, {"phone": "080***4567", "data": [{"email": "ad***@example.com", "unique_element": "080***4567"}]}
+        )
 
 
 @override_settings(STORAGES=PLAIN_STATIC)
@@ -240,8 +302,10 @@ class StaffAccessTests(TestCase):
         self.assertEqual(with_app.status_code, 200)
 
     def test_public_signup_on_the_staff_pages_is_closed(self):
-        self.client.post("/accounts/signup/", {"email": "intruder@example.com",
-                                               "password1": "Pass-Phrase-9", "password2": "Pass-Phrase-9"})
+        self.client.post(
+            "/accounts/signup/",
+            {"email": "intruder@example.com", "password1": "Pass-Phrase-9", "password2": "Pass-Phrase-9"},
+        )
 
         self.assertFalse(User.objects.filter(email="intruder@example.com").exists())
 
@@ -258,8 +322,12 @@ class StaffAccessTests(TestCase):
 
 class LogRetentionTests(TestCase):
     def test_old_logs_are_only_deleted_with_apply(self):
-        old = ProviderLog.objects.create(service_type="vtpass", request_payload={}, response_payload={}, status_code="000")
-        recent = ProviderLog.objects.create(service_type="vtpass", request_payload={}, response_payload={}, status_code="000")
+        old = ProviderLog.objects.create(
+            service_type="vtpass", request_payload={}, response_payload={}, status_code="000"
+        )
+        recent = ProviderLog.objects.create(
+            service_type="vtpass", request_payload={}, response_payload={}, status_code="000"
+        )
         ProviderLog.objects.filter(pk=old.pk).update(timestamp=timezone.now() - timedelta(days=200))
 
         call_command("purge_old_logs", stdout=io.StringIO())

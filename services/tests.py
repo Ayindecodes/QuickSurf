@@ -24,12 +24,27 @@ from users.models import User
 from wallets import services as wallet_services
 from wallets.models import Transaction, Wallet
 
-VTPASS_DELIVERED = {"provider": {"code": "000", "response_description": "TRANSACTION SUCCESSFUL",
-                                 "content": {"transactions": {"status": "delivered"}}}}
-VTPASS_PENDING = {"provider": {"code": "099", "response_description": "TRANSACTION IS PROCESSING",
-                               "content": {"transactions": {"status": "pending"}}}}
-VTPASS_FAILED = {"provider": {"code": "011", "response_description": "INVALID ARGUMENTS",
-                              "content": {"transactions": {"status": "failed"}}}}
+VTPASS_DELIVERED = {
+    "provider": {
+        "code": "000",
+        "response_description": "TRANSACTION SUCCESSFUL",
+        "content": {"transactions": {"status": "delivered"}},
+    }
+}
+VTPASS_PENDING = {
+    "provider": {
+        "code": "099",
+        "response_description": "TRANSACTION IS PROCESSING",
+        "content": {"transactions": {"status": "pending"}},
+    }
+}
+VTPASS_FAILED = {
+    "provider": {
+        "code": "011",
+        "response_description": "INVALID ARGUMENTS",
+        "content": {"transactions": {"status": "failed"}},
+    }
+}
 
 
 def _ledger_types(reference):
@@ -529,24 +544,26 @@ class VTpassClientTests(SimpleTestCase):
         request_id = generate_request_id()
 
         self.assertRegex(request_id, r"^\d{12}[0-9A-F]{12}$")
-        self.assertIn(request_id[:12], {lagos_now.strftime("%Y%m%d%H%M"),
-                                        (lagos_now + timedelta(minutes=1)).strftime("%Y%m%d%H%M")})
+        self.assertIn(
+            request_id[:12],
+            {lagos_now.strftime("%Y%m%d%H%M"), (lagos_now + timedelta(minutes=1)).strftime("%Y%m%d%H%M")},
+        )
 
     def test_outcomes_follow_the_vtpass_response_codes(self):
         cases = [
             ({"code": "000", "content": {"transactions": {"status": "delivered"}}}, "successful"),
             ({"code": "000", "content": {"transactions": {"status": "pending"}}}, "pending"),
             ({"code": "000", "content": {"transactions": {"status": "initiated"}}}, "pending"),
-            ({"code": "099"}, "pending"),   # processing
-            ({"code": "014"}, "pending"),   # request ID already used: the first attempt may have gone through
-            ({"code": "083"}, "pending"),   # system error
+            ({"code": "099"}, "pending"),  # processing
+            ({"code": "014"}, "pending"),  # request ID already used: the first attempt may have gone through
+            ({"code": "083"}, "pending"),  # system error
             ({"code": "999", "response_description": "Network error"}, "pending"),
-            ({"code": "123"}, "pending"),   # unknown code
+            ({"code": "123"}, "pending"),  # unknown code
             ({}, "pending"),
-            ({"code": "016"}, "failed"),    # transaction failed
-            ({"code": "018"}, "failed"),    # low wallet balance
-            ({"code": "085"}, "failed"),    # improper request ID
-            ({"code": "015"}, "failed"),    # requery: VTpass never received it
+            ({"code": "016"}, "failed"),  # transaction failed
+            ({"code": "018"}, "failed"),  # low wallet balance
+            ({"code": "085"}, "failed"),  # improper request ID
+            ({"code": "015"}, "failed"),  # requery: VTpass never received it
             ({"code": "000", "content": {"transactions": {"status": "failed"}}}, "failed"),
             ({"code": "040", "content": {"transactions": {"status": "reversed"}}}, "reversed"),
         ]
@@ -562,22 +579,28 @@ class VTpassClientTests(SimpleTestCase):
         self.assertEqual([c.kwargs["json"]["serviceID"] for c in send.call_args_list], ["etisalat", "etisalat-data"])
 
     def test_pay_is_not_resent_after_a_read_timeout(self):
-        with patch("services.vtpass.Session.request", side_effect=requests.exceptions.ReadTimeout()) as send, \
-             patch("services.vtpass.time.sleep"):
+        with (
+            patch("services.vtpass.Session.request", side_effect=requests.exceptions.ReadTimeout()) as send,
+            patch("services.vtpass.time.sleep"),
+        ):
             result = purchase_airtime("mtn", "08031234567", 100, request_id="202610231200ABCDEF123456")
 
         self.assertEqual(send.call_count, 1)
         self.assertEqual(result["state"], "pending")
 
     def test_pay_is_retried_after_a_connect_timeout(self):
-        with patch("services.vtpass.Session.request", side_effect=requests.exceptions.ConnectTimeout()) as send, \
-             patch("services.vtpass.time.sleep"):
+        with (
+            patch("services.vtpass.Session.request", side_effect=requests.exceptions.ConnectTimeout()) as send,
+            patch("services.vtpass.time.sleep"),
+        ):
             purchase_airtime("mtn", "08031234567", 100, request_id="202610231200ABCDEF123456")
 
         self.assertEqual(send.call_count, 2)
 
     def test_balance_is_read_from_the_response_contents(self):
-        with patch("services.vtpass._request", return_value=(200, {"code": 1, "contents": {"balance": 1081.8199999998}})):
+        with patch(
+            "services.vtpass._request", return_value=(200, {"code": 1, "contents": {"balance": 1081.8199999998}})
+        ):
             self.assertEqual(get_balance(), Decimal("1081.82"))
 
 
@@ -601,16 +624,22 @@ class VTpassPurchaseTests(APITestCase):
         return wallet.balance, wallet.locked
 
     def _callback(self, request_id, claimed_status="delivered"):
-        payload = {"type": "transaction-update", "data": {
-            "code": "000", "requestId": request_id, "content": {"transactions": {"status": claimed_status}}}}
+        payload = {
+            "type": "transaction-update",
+            "data": {"code": "000", "requestId": request_id, "content": {"transactions": {"status": claimed_status}}},
+        }
         return self.client.post(reverse("vtpass-callback"), payload, format="json")
 
     def test_a_timeout_keeps_the_money_held_instead_of_refunding(self):
-        with patch("services.vtpass.Session.request", side_effect=requests.exceptions.ReadTimeout()), \
-             patch("services.vtpass.time.sleep"):
-            self.client.post(reverse("airtime-purchase"),
-                             {"amount": "300", "network": "mtn", "phone": "08031234567", "client_reference": "TO-1"},
-                             format="json")
+        with (
+            patch("services.vtpass.Session.request", side_effect=requests.exceptions.ReadTimeout()),
+            patch("services.vtpass.time.sleep"),
+        ):
+            self.client.post(
+                reverse("airtime-purchase"),
+                {"amount": "300", "network": "mtn", "phone": "08031234567", "client_reference": "TO-1"},
+                format="json",
+            )
 
         self.assertEqual(AirtimeTransaction.objects.get(client_reference="TO-1").status, "pending")
         self.assertEqual(_ledger_types("airtime:TO-1"), ["hold"])
@@ -651,8 +680,13 @@ class VTpassPurchaseTests(APITestCase):
     def test_a_reversal_after_delivery_refunds_the_user_once(self):
         self._buy("REV-1", VTPASS_DELIVERED)
         txn = AirtimeTransaction.objects.get(client_reference="REV-1")
-        reversed_body = {"provider": {"code": "040", "response_description": "TRANSACTION REVERSAL TO WALLET",
-                                      "content": {"transactions": {"status": "reversed"}}}}
+        reversed_body = {
+            "provider": {
+                "code": "040",
+                "response_description": "TRANSACTION REVERSAL TO WALLET",
+                "content": {"transactions": {"status": "reversed"}},
+            }
+        }
 
         with patch("services.views.requery_status", return_value=reversed_body):
             self._callback(txn.provider_request_id, claimed_status="reversed")
@@ -694,8 +728,11 @@ class VTpassPurchaseTests(APITestCase):
         self.assertEqual(too_big.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(self._wallet(), (Decimal("1000.00"), Decimal("0.00")))
 
-    @override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache",
-                                           "LOCATION": "redis://127.0.0.1:9/0"}})
+    @override_settings(
+        CACHES={
+            "default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": "redis://127.0.0.1:9/0"}
+        }
+    )
     def test_purchases_still_work_when_the_cache_is_down(self):
         with self.assertLogs("services.views", level="ERROR"):
             response = self._buy("NOCACHE-1", VTPASS_DELIVERED)
@@ -711,8 +748,10 @@ class DataPlanCatalogTests(APITestCase):
         self.user = User.objects.create_user(email="plans@example.com", password="StrongPass123")
         wallet_services.credit_topup(self.user, Decimal("3000.00"), f"SEED-{self.user.id}")
         self.client.force_authenticate(self.user)
-        patcher = patch("services.views.get_service_variations",
-                        return_value=_variations_response(DATA_PLAN_PRICES, key="varations"))
+        patcher = patch(
+            "services.views.get_service_variations",
+            return_value=_variations_response(DATA_PLAN_PRICES, key="varations"),
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -720,16 +759,19 @@ class DataPlanCatalogTests(APITestCase):
         response = self.client.get(reverse("data-plans", args=["mtn"]))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual({p["code"]: p["price"] for p in response.data["plans"]},
-                         {"mtn-1gb": "1200.00", "mtn-500mb": "900.00"})
+        self.assertEqual(
+            {p["code"]: p["price"] for p in response.data["plans"]}, {"mtn-1gb": "1200.00", "mtn-500mb": "900.00"}
+        )
 
     @override_settings(DATA_PRICE_MARKUP_PERCENT=Decimal("10"))
     @patch("services.views.purchase_data", return_value=DATA_DELIVERED)
     def test_a_markup_is_shown_in_the_catalog_and_charged(self, _mock_purchase_data):
         listed = self.client.get(reverse("data-plans", args=["mtn"]))
-        bought = self.client.post(reverse("data-purchase"),
-                                  {"amount": "1320.00", "network": "mtn", "phone": "08031234567", "plan": "mtn-1gb"},
-                                  format="json")
+        bought = self.client.post(
+            reverse("data-purchase"),
+            {"amount": "1320.00", "network": "mtn", "phone": "08031234567", "plan": "mtn-1gb"},
+            format="json",
+        )
 
         self.assertEqual({p["code"]: p["price"] for p in listed.data["plans"]}["mtn-1gb"], "1320.00")
         self.assertEqual(bought.status_code, status.HTTP_201_CREATED)
@@ -751,13 +793,21 @@ class VTpassOpsTests(TestCase):
 
     def test_purchases_stuck_pending_are_logged_as_errors(self):
         user = User.objects.create_user(email="stuck@example.com", password="StrongPass123")
-        txn = AirtimeTransaction.objects.create(user=user, network="mtn", phone="08031234567", amount=Decimal("100"),
-                                                status="pending", client_reference="STUCK-1",
-                                                provider_request_id="202610231200STUCK0000000")
+        txn = AirtimeTransaction.objects.create(
+            user=user,
+            network="mtn",
+            phone="08031234567",
+            amount=Decimal("100"),
+            status="pending",
+            client_reference="STUCK-1",
+            provider_request_id="202610231200STUCK0000000",
+        )
         AirtimeTransaction.objects.filter(pk=txn.pk).update(timestamp=timezone.now() - timedelta(hours=2))
 
-        with patch("core.management.commands.requery_pending.requery_status", return_value=VTPASS_PENDING), \
-             self.assertLogs("core.management.commands.requery_pending", level="ERROR") as logs:
+        with (
+            patch("core.management.commands.requery_pending.requery_status", return_value=VTPASS_PENDING),
+            self.assertLogs("core.management.commands.requery_pending", level="ERROR") as logs,
+        ):
             call_command("requery_pending", stdout=io.StringIO())
 
         self.assertIn("STUCK-1", logs.output[0])
@@ -765,8 +815,13 @@ class VTpassOpsTests(TestCase):
     def test_migration_records_the_request_id_that_was_actually_sent(self):
         user = User.objects.create_user(email="legacy@example.com", password="StrongPass123")
         txn = AirtimeTransaction.objects.create(
-            user=user, network="mtn", phone="08031234567", amount=Decimal("100"), status="successful",
-            client_reference="AIRTIME_7_3", provider_request_id="echoed-value",
+            user=user,
+            network="mtn",
+            phone="08031234567",
+            amount=Decimal("100"),
+            status="successful",
+            client_reference="AIRTIME_7_3",
+            provider_request_id="echoed-value",
             raw_response={"code": "000", "content": {"transactions": {"status": "delivered", "transactionId": "TX-9"}}},
         )
 

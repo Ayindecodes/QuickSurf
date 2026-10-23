@@ -33,6 +33,7 @@ Session = requests.Session()
 # Helpers
 # ============================================================================
 
+
 def _headers_for(method: str) -> Dict[str, str]:
     """
     VTpass (official docs):
@@ -98,19 +99,23 @@ def _request(
             )
             parsed = _safe_json(resp)
             if log_fn:
-                log_fn({
-                    "service": "vtpass",
-                    "endpoint": path,
-                    "status_code": resp.status_code,
-                    "request_id": (json or params or {}).get("request_id"),
-                    "request": mask_pii(json or params or {}),
-                    "response": mask_pii(parsed),
-                })
+                log_fn(
+                    {
+                        "service": "vtpass",
+                        "endpoint": path,
+                        "status_code": resp.status_code,
+                        "request_id": (json or params or {}).get("request_id"),
+                        "request": mask_pii(json or params or {}),
+                        "response": mask_pii(parsed),
+                    }
+                )
             return resp.status_code, parsed
 
-        except (requests.exceptions.ConnectTimeout,
-                requests.exceptions.ReadTimeout,
-                requests.exceptions.ConnectionError) as e:
+        except (
+            requests.exceptions.ConnectTimeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectionError,
+        ) as e:
             last_exc = e
             if attempt < retries and (resend_safe or isinstance(e, requests.exceptions.ConnectTimeout)):
                 time.sleep(0.8)
@@ -122,14 +127,16 @@ def _request(
                 "http_status": 0,
             }
             if log_fn:
-                log_fn({
-                    "service": "vtpass",
-                    "endpoint": path,
-                    "status_code": 0,
-                    "request_id": (json or params or {}).get("request_id"),
-                    "request": mask_pii(json or params or {}),
-                    "response": mask_pii(parsed_err),
-                })
+                log_fn(
+                    {
+                        "service": "vtpass",
+                        "endpoint": path,
+                        "status_code": 0,
+                        "request_id": (json or params or {}).get("request_id"),
+                        "request": mask_pii(json or params or {}),
+                        "response": mask_pii(parsed_err),
+                    }
+                )
             return 0, parsed_err
 
     raise RuntimeError(f"Unexpected _request flow. Last error: {last_exc}")
@@ -161,12 +168,17 @@ FAILED_CODES = {
     "017",  # above maximum amount
     "018",  # low wallet balance (our VTpass wallet)
     "019",  # likely duplicate transaction (refused)
-    "021", "022", "023", "024",  # account locked / suspended / no API access / inactive
+    "021",
+    "022",
+    "023",
+    "024",  # account locked / suspended / no API access / inactive
     "027",  # IP not whitelisted
     "028",  # product not whitelisted on account
     "030",  # biller not reachable
-    "031", "032",  # quantity limits
-    "034", "035",  # service suspended / inactive
+    "031",
+    "032",  # quantity limits
+    "034",
+    "035",  # service suspended / inactive
     "085",  # improper request id
     "087",  # invalid credentials
     "091",  # transaction not processed
@@ -283,7 +295,7 @@ def purchase_airtime(
 
     return {
         "ok": outcome == "successful",
-        "state": outcome,                 # successful | pending | failed | reversed
+        "state": outcome,  # successful | pending | failed | reversed
         "provider": body,
         "request_id": rid,
         "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
@@ -307,7 +319,7 @@ def purchase_data(
     payload = {
         "request_id": rid,
         "serviceID": service_id,
-        "billersCode": str(phone),   # VTpass uses billersCode for target line
+        "billersCode": str(phone),  # VTpass uses billersCode for target line
         "variation_code": variation_code,
         "phone": str(phone),
     }
@@ -317,7 +329,7 @@ def purchase_data(
 
     return {
         "ok": outcome == "successful",
-        "state": outcome,                 # successful | pending | failed | reversed
+        "state": outcome,  # successful | pending | failed | reversed
         "provider": body,
         "request_id": rid,
         "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
@@ -342,7 +354,7 @@ def requery_status(
 
     return {
         "ok": outcome == "successful",
-        "state": outcome,                 # successful | pending | failed | reversed
+        "state": outcome,  # successful | pending | failed | reversed
         "provider": body,
         "request_id": request_id,
         "message": (body.get("response_description") if isinstance(body, dict) else "") or "",

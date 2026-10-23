@@ -46,11 +46,16 @@ class AirtimeTransaction(models.Model):
 
     # Provider metadata
     provider_request_id = models.CharField(
-        max_length=100, blank=True, null=True, db_index=True,
+        max_length=100,
+        blank=True,
+        null=True,
+        db_index=True,
         help_text="Provider-side request/reference id (e.g., VTpass request_id)",
     )
     provider_reference = models.CharField(
-        max_length=100, blank=True, null=True,
+        max_length=100,
+        blank=True,
+        null=True,
         help_text="Provider transactionId or equivalent",
     )
     provider_status = models.CharField(max_length=64, blank=True, null=True)
@@ -90,11 +95,16 @@ class DataTransaction(models.Model):
 
     # Provider metadata
     provider_request_id = models.CharField(
-        max_length=100, blank=True, null=True, db_index=True,
+        max_length=100,
+        blank=True,
+        null=True,
+        db_index=True,
         help_text="Provider-side request/reference id (e.g., VTpass request_id)",
     )
     provider_reference = models.CharField(
-        max_length=100, blank=True, null=True,
+        max_length=100,
+        blank=True,
+        null=True,
         help_text="Provider transactionId or equivalent",
     )
     provider_status = models.CharField(max_length=64, blank=True, null=True)
@@ -158,4 +168,3 @@ class ProviderLog(models.Model):
     def __str__(self):
         ref = self.client_reference or self.request_id or "-"
         return f"{self.service_type} | {ref} | {self.status_code}"
-

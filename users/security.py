@@ -6,6 +6,7 @@ PINs and codes are short, so their safety comes from attempt limits, not hash st
 stored as an HMAC keyed with SECRET_KEY: a leaked database alone can't be used to recover them
 (rotating SECRET_KEY means users set their PIN again).
 """
+
 import hashlib
 import hmac
 import logging
@@ -26,7 +27,20 @@ logger = logging.getLogger(__name__)
 CODE_TTL = timedelta(minutes=15)
 CODE_RESEND_INTERVAL = timedelta(seconds=60)
 WEAK_PINS = {d * 4 for d in "0123456789"} | {
-    "0123", "1234", "2345", "3456", "4567", "5678", "6789", "9876", "8765", "7654", "6543", "5432", "4321", "3210",
+    "0123",
+    "1234",
+    "2345",
+    "3456",
+    "4567",
+    "5678",
+    "6789",
+    "9876",
+    "8765",
+    "7654",
+    "6543",
+    "5432",
+    "4321",
+    "3210",
 }
 
 
@@ -75,12 +89,16 @@ def check_pin(user, pin: str) -> None:
             if record.failed_attempts >= TransactionPin.MAX_ATTEMPTS:
                 record.failed_attempts = 0
                 record.locked_until = now + timedelta(minutes=TransactionPin.LOCK_MINUTES)
-                logger.warning("Transaction PIN locked for user %s after %s wrong attempts",
-                               user.pk, TransactionPin.MAX_ATTEMPTS)
-                error = PinError("pin_locked", "Too many wrong PINs. Try again later.", locked_until=record.locked_until)
+                logger.warning(
+                    "Transaction PIN locked for user %s after %s wrong attempts", user.pk, TransactionPin.MAX_ATTEMPTS
+                )
+                error = PinError(
+                    "pin_locked", "Too many wrong PINs. Try again later.", locked_until=record.locked_until
+                )
             else:
-                error = PinError("pin_invalid", "Wrong PIN.",
-                                 attempts_left=TransactionPin.MAX_ATTEMPTS - record.failed_attempts)
+                error = PinError(
+                    "pin_invalid", "Wrong PIN.", attempts_left=TransactionPin.MAX_ATTEMPTS - record.failed_attempts
+                )
             record.save(update_fields=["failed_attempts", "locked_until", "updated_at"])
     raise error  # outside the atomic block, so the failed attempt is kept
 
@@ -93,8 +111,9 @@ def issue_code(user, purpose: str) -> str | None:
         return None
     OneTimeCode.objects.filter(user=user, purpose=purpose, used_at__isnull=True).update(used_at=now)
     code = f"{secrets.randbelow(1_000_000):06d}"
-    OneTimeCode.objects.create(user=user, purpose=purpose, code_hash=_digest("code", user.pk, purpose, code),
-                               expires_at=now + CODE_TTL)
+    OneTimeCode.objects.create(
+        user=user, purpose=purpose, code_hash=_digest("code", user.pk, purpose, code), expires_at=now + CODE_TTL
+    )
     return code
 
 
@@ -102,9 +121,12 @@ def redeem_code(user, purpose: str, code: str) -> bool:
     """True if code is the user's current unexpired code for purpose (it is then used up). Wrong tries count."""
     now = timezone.now()
     with transaction.atomic():
-        record = (OneTimeCode.objects.select_for_update()
-                  .filter(user=user, purpose=purpose, used_at__isnull=True, expires_at__gt=now)
-                  .order_by("-created_at").first())
+        record = (
+            OneTimeCode.objects.select_for_update()
+            .filter(user=user, purpose=purpose, used_at__isnull=True, expires_at__gt=now)
+            .order_by("-created_at")
+            .first()
+        )
         if record is None or record.attempts >= OneTimeCode.MAX_ATTEMPTS:
             return False
         if hmac.compare_digest(record.code_hash, _digest("code", user.pk, purpose, str(code or "").strip())):
@@ -122,8 +144,10 @@ def send_code(user, purpose: str, code: str) -> bool:
         subject, action = "Verify your QuickSurf email", "verify your email"
     else:
         subject, action = "Reset your QuickSurf password", "reset your password"
-    body = (f"Your code to {action} is {code}.\n\nIt expires in {minutes} minutes. "
-            "If you didn't ask for it, you can ignore this email.\n\nQuickSurf")
+    body = (
+        f"Your code to {action} is {code}.\n\nIt expires in {minutes} minutes. "
+        "If you didn't ask for it, you can ignore this email.\n\nQuickSurf"
+    )
     return send_email(user.email, subject, body, log_body=body.replace(code, "******"))
 
 

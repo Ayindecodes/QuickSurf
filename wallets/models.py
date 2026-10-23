@@ -31,9 +31,8 @@ class Wallet(models.Model):
       locked:  money held for purchases still waiting on VTpass.
     Only wallets.services may change these, and every change writes a Transaction row.
     """
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wallet"
-    )
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wallet")
     balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     locked = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -56,12 +55,12 @@ class Transaction(models.Model):
     'amount' is always positive.
     """
 
-    TYPE_OPENING = "opening"        # balance carried over when the ledger started
-    TYPE_TOPUP = "topup"            # Paystack payment credited:            balance +
-    TYPE_HOLD = "hold"              # purchase started, money set aside:    balance -, locked +
-    TYPE_CAPTURE = "capture"        # purchase delivered, held money spent: locked -
-    TYPE_RELEASE = "release"        # purchase failed, held money returned: locked -, balance +
-    TYPE_REVERSAL = "reversal"      # delivered purchase later reversed by VTpass: balance +
+    TYPE_OPENING = "opening"  # balance carried over when the ledger started
+    TYPE_TOPUP = "topup"  # Paystack payment credited:            balance +
+    TYPE_HOLD = "hold"  # purchase started, money set aside:    balance -, locked +
+    TYPE_CAPTURE = "capture"  # purchase delivered, held money spent: locked -
+    TYPE_RELEASE = "release"  # purchase failed, held money returned: locked -, balance +
+    TYPE_REVERSAL = "reversal"  # delivered purchase later reversed by VTpass: balance +
     TYPE_ADJUSTMENT = "adjustment"  # staff correction in either direction, with a note
 
     # Written before the ledger existed; these carry no deltas.
@@ -122,6 +121,7 @@ class Transaction(models.Model):
 
 
 # --------------------------- convenience signals --------------------------- #
+
 
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def ensure_user_wallet(sender, instance, created, **kwargs):

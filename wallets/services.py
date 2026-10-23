@@ -11,6 +11,7 @@ single database transaction:
   refund_capture  delivered purchase reversed by VTpass   balance +
   adjust        staff correction            balance +/-
 """
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -37,8 +38,9 @@ def _locked_wallet(user) -> Wallet:
     return Wallet.objects.select_for_update().get(user=user)
 
 
-def _record(wallet, entry_type, amount, *, balance_delta=ZERO, locked_delta=ZERO,
-            reference="", note="", created_by=None) -> Transaction:
+def _record(
+    wallet, entry_type, amount, *, balance_delta=ZERO, locked_delta=ZERO, reference="", note="", created_by=None
+) -> Transaction:
     new_balance = wallet.balance + balance_delta
     new_locked = wallet.locked + locked_delta
     if new_balance < 0 or new_locked < 0:
@@ -84,8 +86,9 @@ def hold(user, amount, reference: str) -> Transaction:
     """Set money aside for a purchase. Raises InsufficientFunds if the balance is too low."""
     wallet = _locked_wallet(user)
     amount = _money(amount)
-    return _record(wallet, Transaction.TYPE_HOLD, amount,
-                   balance_delta=-amount, locked_delta=amount, reference=reference)
+    return _record(
+        wallet, Transaction.TYPE_HOLD, amount, balance_delta=-amount, locked_delta=amount, reference=reference
+    )
 
 
 @transaction.atomic
@@ -106,8 +109,14 @@ def release(user, reference: str) -> bool:
     held = _open_hold(wallet, reference)
     if held is None:
         return False
-    _record(wallet, Transaction.TYPE_RELEASE, held.amount,
-            balance_delta=held.amount, locked_delta=-held.amount, reference=reference)
+    _record(
+        wallet,
+        Transaction.TYPE_RELEASE,
+        held.amount,
+        balance_delta=held.amount,
+        locked_delta=-held.amount,
+        reference=reference,
+    )
     return True
 
 
@@ -128,10 +137,14 @@ def refund_capture(user, reference: str) -> bool:
 
 def stale_locked(wallet) -> Decimal:
     """Locked money that no open purchase hold accounts for."""
-    closed = set(wallet.transactions.filter(type__in=[Transaction.TYPE_CAPTURE, Transaction.TYPE_RELEASE])
-                 .values_list("reference", flat=True))
-    held = sum((h.amount for h in wallet.transactions.filter(type=Transaction.TYPE_HOLD) if h.reference not in closed),
-               ZERO)
+    closed = set(
+        wallet.transactions.filter(type__in=[Transaction.TYPE_CAPTURE, Transaction.TYPE_RELEASE]).values_list(
+            "reference", flat=True
+        )
+    )
+    held = sum(
+        (h.amount for h in wallet.transactions.filter(type=Transaction.TYPE_HOLD) if h.reference not in closed), ZERO
+    )
     return wallet.locked - held
 
 
@@ -166,5 +179,12 @@ def adjust(user, amount, note: str, created_by=None, reference: str = "") -> Tra
         raise ValueError("Adjustment amount can't be zero.")
 
     wallet = _locked_wallet(user)
-    return _record(wallet, Transaction.TYPE_ADJUSTMENT, abs(delta), balance_delta=delta,
-                   reference=reference, note=note, created_by=created_by)
+    return _record(
+        wallet,
+        Transaction.TYPE_ADJUSTMENT,
+        abs(delta),
+        balance_delta=delta,
+        reference=reference,
+        note=note,
+        created_by=created_by,
+    )
