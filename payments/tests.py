@@ -9,7 +9,7 @@ from rest_framework.test import APITestCase
 from payments.models import PaymentIntent
 from payments.views import _credit_wallet_once
 from users.models import User
-from wallets.models import Wallet
+from wallets.models import Transaction, Wallet
 
 VERIFY_GATEWAY_ERROR = (502, {"raw": "<html>Bad gateway</html>", "http_status": 502})
 
@@ -189,6 +189,25 @@ class PaymentFlowTests(APITestCase):
         self.assertEqual(self.wallet.balance, Decimal("800.00"))
         self.assertEqual(intent.status, "success")
         self.assertEqual(len(intent.webhook_events or []), 2)
+
+    @patch("payments.views.valid_webhook", return_value=True)
+    @patch("payments.views.ps_verify", return_value=_verify_success(150000))
+    def test_verify_and_webhook_together_write_one_ledger_entry(self, _mock_verify, _mock_valid_webhook):
+        intent = PaymentIntent.objects.create(
+            user=self.user,
+            amount=Decimal("1500.00"),
+            reference="PAY-BOTH-1",
+            status="pending",
+        )
+        webhook = {"event": "charge.success", "data": {"reference": intent.reference, "status": "success"}}
+
+        self.client.get(reverse("payments_verify", args=[intent.reference]))
+        self.client.post(reverse("payments_webhook"), webhook, format="json")
+
+        self.wallet.refresh_from_db()
+
+        self.assertEqual(Transaction.objects.filter(type="topup", reference="PAY-BOTH-1").count(), 1)
+        self.assertEqual(self.wallet.balance, Decimal("1500.00"))
 
     @patch("payments.views.valid_webhook", return_value=True)
     def test_charge_failed_webhook_does_not_undo_a_credit(self, _mock_valid_webhook):

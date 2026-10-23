@@ -21,8 +21,10 @@ from rest_framework import serializers as drf_serializers
 from drf_spectacular.utils import extend_schema, inline_serializer
 from drf_spectacular.types import OpenApiTypes
 
+from wallets import services as wallet_services
 from wallets.models import Wallet
 from .models import AirtimeTransaction, DataTransaction, ProviderLog
+from .settlement import FINAL_STATUSES, ledger_reference, settle_purchase
 from .serializers import (
     AirtimeTransactionSerializer,
     DataTransactionSerializer,
@@ -305,25 +307,19 @@ class AirtimePurchaseView(APIView):
             if line_pending:
                 return Response(AirtimeTransactionSerializer(line_pending).data, status=status.HTTP_200_OK)
 
-            # Reserve funds + create pending txn (race-safe)
+            # Hold funds + create pending txn (race-safe)
             with transaction.atomic():
-                wallet = Wallet.objects.select_for_update().get(user=user)
+                Wallet.objects.select_for_update().get(user=user)  # one purchase at a time per wallet
 
                 # re-check idempotency inside the lock
                 again = AirtimeTransaction.objects.filter(user=user, client_reference=client_ref).first()
                 if again:
                     return Response(AirtimeTransactionSerializer(again).data, status=status.HTTP_200_OK)
 
-                if wallet.balance < amt:
+                try:
+                    wallet_services.hold(user, amt, ledger_reference("airtime", client_ref))
+                except wallet_services.InsufficientFunds:
                     return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
-
-                if hasattr(wallet, "locked"):
-                    wallet.balance -= amt
-                    wallet.locked = (wallet.locked or Decimal("0")) + amt
-                    wallet.save(update_fields=["balance", "locked"])
-                else:
-                    wallet.balance -= amt
-                    wallet.save(update_fields=["balance"])
 
                 txn = AirtimeTransaction.objects.create(
                     user=user,
@@ -345,40 +341,13 @@ class AirtimePurchaseView(APIView):
             provider_ref = _extract_provider_reference(provider, default=client_ref)
             provider_desc = str(provider.get("response_description", ""))[:64]
 
-            # Finalize result (+refund on failure)
-            with transaction.atomic():
-                wallet = Wallet.objects.select_for_update().get(user=user)
-                txn = AirtimeTransaction.objects.select_for_update().get(user=user, client_reference=client_ref)
-
-                if hasattr(txn, "provider_status"):
-                    txn.provider_status = provider_desc
-                if hasattr(txn, "provider_request_id"):
-                    txn.provider_request_id = provider_ref
-                if hasattr(txn, "raw_response"):
-                    try:
-                        setattr(txn, "raw_response", provider)
-                    except Exception:
-                        pass
-
-                if outcome == "successful":
-                    txn.status = "successful"
-                    if hasattr(wallet, "locked"):
-                        wallet.locked -= amt
-                        wallet.save(update_fields=["locked"])
-                elif outcome == "pending":
-                    txn.status = "pending"
-                    # keep funds reserved (locked)
-                else:
-                    txn.status = "failed"
-                    if hasattr(wallet, "locked"):
-                        wallet.locked -= amt
-                        wallet.balance += amt
-                        wallet.save(update_fields=["locked", "balance"])
-                    else:
-                        wallet.balance += amt
-                        wallet.save(update_fields=["balance"])
-
-                txn.save()
+            # Settle: capture on success, release (refund) on failure, keep held while pending
+            txn = settle_purchase(
+                txn, outcome,
+                provider_status=provider_desc,
+                provider_request_id=provider_ref,
+                raw_response=provider,
+            )
 
             return Response(AirtimeTransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
 
@@ -467,22 +436,16 @@ class DataPurchaseView(APIView):
                 )
 
             with transaction.atomic():
-                wallet = Wallet.objects.select_for_update().get(user=user)
+                Wallet.objects.select_for_update().get(user=user)  # one purchase at a time per wallet
 
                 again = DataTransaction.objects.filter(user=user, client_reference=client_ref).first()
                 if again:
                     return Response(DataTransactionSerializer(again).data, status=status.HTTP_200_OK)
 
-                if wallet.balance < amt:
+                try:
+                    wallet_services.hold(user, amt, ledger_reference("data", client_ref))
+                except wallet_services.InsufficientFunds:
                     return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
-
-                if hasattr(wallet, "locked"):
-                    wallet.balance -= amt
-                    wallet.locked = (wallet.locked or Decimal("0")) + amt
-                    wallet.save(update_fields=["balance", "locked"])
-                else:
-                    wallet.balance -= amt
-                    wallet.save(update_fields=["balance"])
 
                 txn = DataTransaction.objects.create(
                     user=user,
@@ -504,38 +467,12 @@ class DataPurchaseView(APIView):
             provider_ref = _extract_provider_reference(provider, default=client_ref)
             provider_desc = str(provider.get("response_description", ""))[:64]
 
-            with transaction.atomic():
-                wallet = Wallet.objects.select_for_update().get(user=user)
-                txn = DataTransaction.objects.select_for_update().get(user=user, client_reference=client_ref)
-
-                if hasattr(txn, "provider_status"):
-                    txn.provider_status = provider_desc
-                if hasattr(txn, "provider_request_id"):
-                    txn.provider_request_id = provider_ref
-                if hasattr(txn, "raw_response"):
-                    try:
-                        setattr(txn, "raw_response", provider)
-                    except Exception:
-                        pass
-
-                if outcome == "successful":
-                    txn.status = "successful"
-                    if hasattr(wallet, "locked"):
-                        wallet.locked -= amt
-                        wallet.save(update_fields=["locked"])
-                elif outcome == "pending":
-                    txn.status = "pending"
-                else:
-                    txn.status = "failed"
-                    if hasattr(wallet, "locked"):
-                        wallet.locked -= amt
-                        wallet.balance += amt
-                        wallet.save(update_fields=["locked", "balance"])
-                    else:
-                        wallet.balance += amt
-                        wallet.save(update_fields=["balance"])
-
-                txn.save()
+            txn = settle_purchase(
+                txn, outcome,
+                provider_status=provider_desc,
+                provider_request_id=provider_ref,
+                raw_response=provider,
+            )
 
             return Response(DataTransactionSerializer(txn).data, status=status.HTTP_201_CREATED)
 
@@ -574,42 +511,16 @@ class PurchaseStatusView(APIView):
         if not txn:
             return Response({"detail": "Transaction not found."}, status=404)
 
+        serializer_cls = AirtimeTransactionSerializer if isinstance(txn, AirtimeTransaction) else DataTransactionSerializer
+        if txn.status in FINAL_STATUSES:
+            return Response(serializer_cls(txn).data)
+
         wrap = _to_plain_json(requery_status(client_reference))
         provider = _unwrap_provider(wrap)
         _log_provider(request.user, "vtpass", client_reference, {"action": "requery"}, wrap)
 
         outcome = _map_vtpass_outcome(provider)
-        if outcome != txn.status:
-            txn.status = outcome
-            if hasattr(txn, "provider_status"):
-                txn.provider_status = str(provider.get("response_description", ""))[:64]
-            txn.save(update_fields=["status", "provider_status", "updated"])
-
-            if outcome == "failed":
-                try:
-                    with transaction.atomic():
-                        wallet = Wallet.objects.select_for_update().get(user=request.user)
-                        if hasattr(wallet, "locked"):
-                            if wallet.locked and wallet.locked >= txn.amount:
-                                wallet.locked -= txn.amount
-                                wallet.balance += txn.amount
-                                wallet.save(update_fields=["locked", "balance"])
-                        else:
-                            wallet.balance += txn.amount
-                            wallet.save(update_fields=["balance"])
-                except Wallet.DoesNotExist:
-                    pass
-            elif outcome == "successful":
-                try:
-                    with transaction.atomic():
-                        wallet = Wallet.objects.select_for_update().get(user=request.user)
-                        if hasattr(wallet, "locked") and wallet.locked and wallet.locked >= txn.amount:
-                            wallet.locked -= txn.amount
-                            wallet.save(update_fields=["locked"])
-                except Wallet.DoesNotExist:
-                    pass
-
-        serializer_cls = AirtimeTransactionSerializer if isinstance(txn, AirtimeTransaction) else DataTransactionSerializer
+        txn = settle_purchase(txn, outcome, provider_status=str(provider.get("response_description", ""))[:64])
         return Response(serializer_cls(txn).data)
 
 

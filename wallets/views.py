@@ -7,14 +7,13 @@ from rest_framework.pagination import PageNumberPagination
 
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
 
+from . import services as wallet_services
 from .models import Wallet
 from services.models import AirtimeTransaction, DataTransaction
 from .serializers import (
     WalletBalanceSerializer,
     TransactionSerializer,
-    CreditSerializer,
-    LockSerializer,
-    UnlockSerializer,
+    AdjustmentSerializer,
 )
 
 
@@ -87,7 +86,7 @@ class WalletSummaryView(APIView):
 
 
 @extend_schema(
-    description="List the authenticated user's wallet transactions (most recent first).",
+    description="List the authenticated user's wallet ledger entries (most recent first).",
     request=None,
     parameters=[
         OpenApiParameter(name="page", required=False, type=int),
@@ -104,7 +103,7 @@ class TransactionListView(APIView):
         except Wallet.DoesNotExist:
             return Response({"detail": "Wallet not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        qs = wallet.transactions.all().order_by("-timestamp")
+        qs = wallet.transactions.all().order_by("-timestamp", "-id")
 
         paginator = SafePaginator()
         page = paginator.paginate_queryset(qs, request)
@@ -113,51 +112,24 @@ class TransactionListView(APIView):
 
 
 @extend_schema(
-    description="Admin-only credit to a user's wallet.",
-    request=CreditSerializer,
+    description=(
+        "Staff-only correction to a user's wallet. A positive amount adds to the balance, a negative "
+        "one takes from it. A note explaining why is required and is kept on the ledger entry."
+    ),
+    request=AdjustmentSerializer,
     responses={201: TransactionSerializer, 400: OpenApiResponse(description="Validation error")},
 )
-class CreditView(APIView):
+class AdjustView(APIView):
     permission_classes = [IsAdminUser]
 
     def post(self, request):
-        serializer = CreditSerializer(data=request.data, context={"request": request})
-        if serializer.is_valid():
-            tx = serializer.save()
-            return Response(TransactionSerializer(tx).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer = AdjustmentSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
-@extend_schema(
-    description="Lock funds in the authenticated user's wallet.",
-    request=LockSerializer,
-    responses={201: TransactionSerializer, 400: OpenApiResponse(description="Validation error")},
-)
-class LockFundsView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        data = {"user": request.user.id, "amount": request.data.get("amount")}
-        serializer = LockSerializer(data=data, context={"request": request})
-        if serializer.is_valid():
-            tx = serializer.save()
-            return Response(TransactionSerializer(tx).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-@extend_schema(
-    description="Unlock previously locked funds in the authenticated user's wallet.",
-    request=UnlockSerializer,
-    responses={201: TransactionSerializer, 400: OpenApiResponse(description="Validation error")},
-)
-class UnlockFundsView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        data = {"user": request.user.id, "amount": request.data.get("amount")}
-        serializer = UnlockSerializer(data=data, context={"request": request})
-        if serializer.is_valid():
-            tx = serializer.save()
-            return Response(TransactionSerializer(tx).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+        data = serializer.validated_data
+        try:
+            entry = wallet_services.adjust(data["user"], data["amount"], data["note"], created_by=request.user)
+        except wallet_services.InsufficientFunds:
+            return Response({"amount": ["This would take the balance below zero."]}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(TransactionSerializer(entry).data, status=status.HTTP_201_CREATED)

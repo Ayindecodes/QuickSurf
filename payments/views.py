@@ -12,7 +12,7 @@ from rest_framework import status
 from rest_framework import serializers as drf_serializers
 from drf_spectacular.utils import extend_schema, inline_serializer
 
-from wallets.models import Wallet
+from wallets import services as wallet_services
 from services.models import ProviderLog
 from .models import PaymentIntent
 from .serializers import PaymentInitRequestSerializer
@@ -44,12 +44,10 @@ def _credit_wallet_once(user, amount: Decimal, reference: str):
         if intent.status == "success":
             return False  # already credited
 
-        wallet = Wallet.objects.select_for_update().get(user=user)
-        wallet.balance += amount
-        wallet.save(update_fields=["balance"])
-
+        # The ledger's unique (topup, reference) entry is the hard guarantee against crediting twice.
+        credited = wallet_services.credit_topup(user, amount, reference)
         intent.mark_success(when=timezone.now())
-    return True
+    return credited
 
 def _set_status_unless_success(intent, new_status: str) -> None:
     """Change an intent's status without ever overwriting a credited (success) intent."""
