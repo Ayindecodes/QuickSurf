@@ -425,6 +425,7 @@ TOPUPS_ENABLED = env_bool("TOPUPS_ENABLED", default=True)
 # Purchase limits in naira. DAILY_PURCHASE_LIMIT is per user per day (Lagos time); 0 turns it off.
 AIRTIME_MIN_AMOUNT = config("AIRTIME_MIN_AMOUNT", default=50, cast=int)
 AIRTIME_MAX_AMOUNT = config("AIRTIME_MAX_AMOUNT", default=50000, cast=int)
+TOPUP_MAX_AMOUNT = config("TOPUP_MAX_AMOUNT", default=500000, cast=int)  # per top-up; 0 = no limit
 DAILY_PURCHASE_LIMIT = config("DAILY_PURCHASE_LIMIT", default=200000, cast=int)
 # Accounts less than a day old get a lower daily limit (0 = same as everyone).
 NEW_ACCOUNT_DAILY_LIMIT = config("NEW_ACCOUNT_DAILY_LIMIT", default=20000, cast=int)

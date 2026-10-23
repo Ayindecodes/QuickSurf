@@ -622,3 +622,25 @@ class ApiVersionTests(APITestCase):
 
     def test_successful_responses_are_the_same_on_both_paths(self):
         self.assertEqual(self.client.get("/api/v1/wallet/").json(), self.client.get("/api/wallet/").json())
+
+
+class LoadTestUsersTests(TestCase):
+    def test_creates_verified_funded_users_with_a_pin_and_tokens(self):
+        out = "/tmp/qs-loadtest-users-test.json"
+        call_command("loadtest_users", "--count", "2", "--balance", "500", "--output", out, stdout=io.StringIO())
+
+        with open(out) as f:
+            data = json.load(f)
+        os.remove(out)
+        self.assertEqual(len(data["users"]), 2)
+        user = User.objects.get(email=data["users"][0]["email"])
+        self.assertTrue(user.email_verified)
+        self.assertTrue(TransactionPin.objects.filter(user=user).exists())
+        self.assertEqual(Wallet.objects.get(user=user).balance, Decimal("500.00"))
+        self.assertEqual(Transaction.objects.get(wallet__user=user).type, "adjustment")
+
+    def test_refuses_in_production_or_with_live_providers(self):
+        for overrides in ({"IS_PRODUCTION": True}, {"PROVIDER_MODE": "LIVE"}):
+            with self.settings(**overrides), self.assertRaises(CommandError):
+                call_command("loadtest_users", "--count", "1", "--output", "/tmp/never-written.json")
+        self.assertFalse(User.objects.filter(email__startswith="loadtest+").exists())

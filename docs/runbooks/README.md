@@ -9,6 +9,8 @@ What to do when something goes wrong. Alerts and the daily report link to the pa
 | Top-ups not credited, Paystack errors, rejected webhooks | [paystack-outage.md](paystack-outage.md) |
 | Wallet/ledger mismatch, top-up "review", suspected double credit | [money-mismatch.md](money-mismatch.md) |
 | Rotating keys or secrets | [key-rotation.md](key-rotation.md) |
+| A bad deploy | [rollback.md](rollback.md) |
+| Backups, restoring the database | [backups.md](backups.md) |
 
 ## First moves in any incident
 
@@ -25,15 +27,7 @@ What to do when something goes wrong. Alerts and the daily report link to the pa
   when it isn't `200`.
 - **Errors:** set `SENTRY_DSN` to send errors and `ERROR` log lines to Sentry. Request bodies are never sent.
 - **Alerts:** set `OPS_ALERT_EMAILS` (comma-separated). It needs working SMTP settings.
-- **Scheduled jobs** (Render cron):
-
-  | Command | Every |
-  |---|---|
-  | `python manage.py ops_alerts` | 15 minutes |
-  | `python manage.py requery_pending` | 5 minutes |
-  | `python manage.py verify_pending_topups` | 10 minutes |
-  | `python manage.py daily_report` | daily, early morning |
-  | `python manage.py purge_old_logs --apply` | weekly |
+- **Scheduled jobs:** see the cron table in [DEPLOYMENT.md](../../DEPLOYMENT.md#render-backend).
 
 ## Where to look
 
