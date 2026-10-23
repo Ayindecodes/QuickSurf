@@ -257,9 +257,9 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ("rest_framework_simplejwt.authentication.JWTAuthentication",),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": (
-        ("rest_framework.renderers.JSONRenderer", "rest_framework.renderers.BrowsableAPIRenderer")
+        ("core.renderers.ApiJSONRenderer", "rest_framework.renderers.BrowsableAPIRenderer")
         if DEBUG
-        else ("rest_framework.renderers.JSONRenderer",)
+        else ("core.renderers.ApiJSONRenderer",)
     ),
     "EXCEPTION_HANDLER": "core.exceptions.api_exception_handler",
     "DEFAULT_THROTTLE_CLASSES": [
@@ -276,6 +276,8 @@ REST_FRAMEWORK = {
         "password_reset": "10/hour",
         "verify_email": "10/hour",
         "pin_change": "10/hour",
+        "password_change": "10/hour",
+        "redeem": "10/hour",
         "purchase": config("PURCHASE_RATE", default="30/hour"),  # per user
         "topup": config("TOPUP_RATE", default="20/hour"),  # per user
     },
@@ -410,6 +412,9 @@ if IS_PRODUCTION and not PAYSTACK_SECRET_KEY.startswith("sk_live_"):
 # -------------------------------------------------------------------
 POINTS_PER_NAIRA = config("POINTS_PER_NAIRA", default="0.01")
 REWARDS_ENABLED = env_bool("REWARDS_ENABLED", default=True)
+# Loyalty points: earned at POINTS_PER_NAIRA, each worth REWARD_POINT_VALUE naira when redeemed into the wallet.
+REWARD_POINT_VALUE = config("REWARD_POINT_VALUE", default="1.00", cast=Decimal)
+REWARDS_MIN_REDEMPTION = config("REWARDS_MIN_REDEMPTION", default=100, cast=int)
 RECEIPT_EMAILS_ENABLED = env_bool("RECEIPT_EMAILS_ENABLED", default=True)
 
 # Kill switches: set to False on Render to stop new purchases or top-ups without a code change.

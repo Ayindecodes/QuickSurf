@@ -61,6 +61,7 @@ class Transaction(models.Model):
     TYPE_CAPTURE = "capture"  # purchase delivered, held money spent: locked -
     TYPE_RELEASE = "release"  # purchase failed, held money returned: locked -, balance +
     TYPE_REVERSAL = "reversal"  # delivered purchase later reversed by VTpass: balance +
+    TYPE_REWARD = "reward"  # loyalty points redeemed into the wallet: balance +
     TYPE_ADJUSTMENT = "adjustment"  # staff correction in either direction, with a note
 
     # Written before the ledger existed; these carry no deltas.
@@ -77,6 +78,7 @@ class Transaction(models.Model):
         (TYPE_CAPTURE, "Capture"),
         (TYPE_RELEASE, "Release"),
         (TYPE_REVERSAL, "Reversal"),
+        (TYPE_REWARD, "Reward"),
         (TYPE_ADJUSTMENT, "Adjustment"),
         (TYPE_CREDIT, "Credit (legacy)"),
         (TYPE_DEBIT, "Debit (legacy)"),
@@ -111,7 +113,8 @@ class Transaction(models.Model):
             # A Paystack reference is credited once; a purchase is held, captured, released or reversed once.
             models.UniqueConstraint(
                 fields=["type", "reference"],
-                condition=Q(type__in=["opening", "topup", "hold", "capture", "release", "reversal"]) & ~Q(reference=""),
+                condition=Q(type__in=["opening", "topup", "hold", "capture", "release", "reversal", "reward"])
+                & ~Q(reference=""),
                 name="wallets_ledger_unique_type_reference",
             ),
         ]

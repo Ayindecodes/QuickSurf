@@ -168,3 +168,20 @@ class ProviderLog(models.Model):
     def __str__(self):
         ref = self.client_reference or self.request_id or "-"
         return f"{self.service_type} | {ref} | {self.status_code}"
+
+
+class Beneficiary(models.Model):
+    """A number the user buys for often (their own, family's), with the network they chose for it."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="beneficiaries")
+    name = models.CharField(max_length=60)
+    phone = models.CharField(max_length=15, validators=[PHONE_VALIDATOR])
+    network = models.CharField(max_length=10, choices=NETWORK_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("name",)
+        constraints = [models.UniqueConstraint(fields=["user", "phone"], name="services_beneficiary_unique_phone")]
+
+    def __str__(self):
+        return f"{self.name} ({self.network} {self.phone})"

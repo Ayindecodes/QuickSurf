@@ -11,6 +11,7 @@ from .models import (
     NETWORK_CHOICES,
     STATUS_CHOICES,
     AirtimeTransaction,
+    Beneficiary,
     DataTransaction,
 )
 
@@ -207,3 +208,33 @@ class DataPurchaseRequestSerializer(serializers.Serializer):
         if v and not CLIENT_REF_RE.match(v):
             raise serializers.ValidationError("client_reference contains invalid characters or is too long (max 64).")
         return v
+
+
+class BeneficiarySerializer(serializers.ModelSerializer):
+    MAX_PER_USER = 50
+    network = serializers.CharField(max_length=10)  # not a ChoiceField, so "MTN" is accepted and lowercased
+
+    class Meta:
+        model = Beneficiary
+        fields = ("id", "name", "phone", "network", "created_at")
+        read_only_fields = ("id", "created_at")
+
+    def validate_phone(self, value):
+        normalized = normalize_ng_phone(value)
+        if not normalized:
+            raise serializers.ValidationError("Enter a Nigerian number like 0703xxxxxxx or +234703xxxxxxx.")
+        return normalized
+
+    def validate_network(self, value):
+        key = (value or "").lower().strip()
+        if key not in NETWORK_KEYS:
+            raise serializers.ValidationError(f"Choose one of: {', '.join(sorted(NETWORK_KEYS))}.")
+        return key
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+        if Beneficiary.objects.filter(user=user, phone=attrs["phone"]).exists():
+            raise serializers.ValidationError({"phone": ["This number is already saved."]})
+        if Beneficiary.objects.filter(user=user).count() >= self.MAX_PER_USER:
+            raise serializers.ValidationError(f"You can save up to {self.MAX_PER_USER} numbers.")
+        return attrs
