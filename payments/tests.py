@@ -1,6 +1,7 @@
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -105,6 +106,32 @@ class PaymentFlowTests(APITestCase):
         self.wallet.refresh_from_db()
 
         self.assertFalse(later.data["credited"])
+        self.assertEqual(self.wallet.balance, Decimal("1500.00"))
+
+    @override_settings(TOPUPS_ENABLED=False)
+    @patch("payments.views.ps_initialize")
+    def test_init_is_refused_while_topups_switched_off(self, mock_initialize):
+        resp = self.client.post(reverse("payments_init"), {"amount": "500.00"}, format="json")
+
+        self.assertEqual(resp.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(mock_initialize.call_count, 0)
+        self.assertFalse(PaymentIntent.objects.filter(user=self.user).exists())
+
+    @override_settings(TOPUPS_ENABLED=False)
+    @patch("payments.views.ps_verify", return_value=_verify_success(150000))
+    def test_verify_still_credits_while_topups_switched_off(self, _mock_verify):
+        intent = PaymentIntent.objects.create(
+            user=self.user,
+            amount=Decimal("1500.00"),
+            reference="PAY-PAUSED-1",
+            status="pending",
+        )
+
+        resp = self.client.get(reverse("payments_verify", args=[intent.reference]))
+
+        self.wallet.refresh_from_db()
+
+        self.assertTrue(resp.data["credited"])
         self.assertEqual(self.wallet.balance, Decimal("1500.00"))
 
     @patch("payments.views.ps_initialize", side_effect=Exception("provider timeout"))

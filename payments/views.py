@@ -1,5 +1,6 @@
 # payments/views.py
 from decimal import Decimal
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -98,10 +99,16 @@ class PaymentInitView(APIView):
 
     @extend_schema(
         request=PaymentInitRequestSerializer,
-        responses={201: PaymentInitResponseSchema, 502: DetailSchema},
+        responses={201: PaymentInitResponseSchema, 502: DetailSchema, 503: DetailSchema},
         description="Initialize a Paystack top-up intent and return authorization URL.",
     )
     def post(self, request):
+        if not settings.TOPUPS_ENABLED:
+            return Response(
+                {"detail": "Top-ups are temporarily unavailable. Please try again later."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         ser = PaymentInitRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         amount = Decimal(str(ser.validated_data["amount"]))

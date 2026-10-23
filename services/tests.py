@@ -1,6 +1,7 @@
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase, APITransactionTestCase
@@ -357,6 +358,38 @@ class DataPurchaseTests(APITestCase):
         self.assertEqual(txn.status, "failed")
         self.assertEqual(self.wallet.balance, Decimal("3000.00"))
         self.assertEqual(self.wallet.locked, Decimal("0.00"))
+
+
+@override_settings(PURCHASES_ENABLED=False)
+class PurchaseKillSwitchTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="paused@example.com", password="StrongPass123")
+        self.wallet = Wallet.objects.get(user=self.user)
+        self.wallet.balance = Decimal("5000.00")
+        self.wallet.save(update_fields=["balance"])
+        self.client.force_authenticate(self.user)
+
+    @patch("services.views.purchase_data")
+    @patch("services.views.purchase_airtime")
+    def test_purchases_are_refused_while_switched_off(self, mock_purchase_airtime, mock_purchase_data):
+        airtime = self.client.post(
+            reverse("airtime-purchase"),
+            {"amount": "100.00", "network": "mtn", "phone": "08031234567"},
+            format="json",
+        )
+        data = self.client.post(
+            reverse("data-purchase"),
+            {"network": "mtn", "phone": "08031234567", "plan": "mtn-1gb"},
+            format="json",
+        )
+
+        self.wallet.refresh_from_db()
+
+        self.assertEqual(airtime.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(data.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(self.wallet.balance, Decimal("5000.00"))
+        self.assertEqual(mock_purchase_airtime.call_count, 0)
+        self.assertEqual(mock_purchase_data.call_count, 0)
 
 
 class RewardAndReceiptSignalTests(APITransactionTestCase):

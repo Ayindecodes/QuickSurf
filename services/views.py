@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 import json
 from typing import Any, Dict
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils.dateparse import parse_date
@@ -240,6 +241,14 @@ def _data_plan_price(network: str, variation_code: str) -> Decimal | None:
     return None
 
 
+# ---------- Kill switch ----------
+def _purchases_paused_response():
+    return Response(
+        {"error": "Purchases are temporarily unavailable. Please try again later."},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
 DetailSchema = inline_serializer(
     name="ServiceDetailResponse",
     fields={"detail": drf_serializers.CharField()},
@@ -262,6 +271,9 @@ class AirtimePurchaseView(APIView):
         return paginator.get_paginated_response(AirtimeTransactionSerializer(page, many=True).data)
 
     def post(self, request):
+        if not settings.PURCHASES_ENABLED:
+            return _purchases_paused_response()
+
         user = request.user
         payload = _to_plain_dict(request.data)
 
@@ -406,6 +418,9 @@ class DataPurchaseView(APIView):
         return paginator.get_paginated_response(DataTransactionSerializer(page, many=True).data)
 
     def post(self, request):
+        if not settings.PURCHASES_ENABLED:
+            return _purchases_paused_response()
+
         user = request.user
         payload = _to_plain_dict(request.data)
 
