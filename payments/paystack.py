@@ -31,7 +31,8 @@ def verify(reference: str):
     return r.status_code, r.json() if "application/json" in r.headers.get("Content-Type","") else {"raw": r.text, "http_status": r.status_code}
 
 def valid_webhook(signature_header: str, raw_body: bytes) -> bool:
-    if not signature_header:
+    # With no secret, anyone could sign with an empty key, so reject everything.
+    if not signature_header or not WEBHOOK_SECRET:
         return False
     digest = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha512).hexdigest()
     return hmac.compare_digest(digest, signature_header)
