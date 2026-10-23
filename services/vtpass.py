@@ -8,19 +8,16 @@ from decimal import Decimal, InvalidOperation
 from typing import Callable, Dict, Optional, Tuple, Any
 
 import requests
-from decouple import config
+from django.conf import settings
 
 # ============================================================================
-# Configuration (LIVE or MOCK/SANDBOX via env)
+# Configuration: one source of truth in quicksurf/settings.py (PROVIDER_MODE, VTPASS_*)
 # ============================================================================
-PROVIDER_MODE = config("PROVIDER_MODE", default="LIVE").upper()  # LIVE | MOCK
-VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
-VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
-VTPASS_SECRET_KEY = config("VTPASS_SECRET_KEY", default="")
-VTPASS_BASE_URL = config(
-    "VTPASS_BASE_URL",
-    default=("https://vtpass.com/api" if PROVIDER_MODE == "LIVE" else "https://sandbox.vtpass.com/api"),
-).rstrip("/")
+PROVIDER_MODE = settings.PROVIDER_MODE  # LIVE | SANDBOX
+VTPASS_API_KEY = settings.VTPASS_API_KEY
+VTPASS_PUBLIC_KEY = settings.VTPASS_PUBLIC_KEY
+VTPASS_SECRET_KEY = settings.VTPASS_SECRET_KEY
+VTPASS_BASE_URL = settings.VTPASS_BASE_URL
 
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 25

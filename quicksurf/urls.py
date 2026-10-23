@@ -1,4 +1,8 @@
+import os
+
 from django.contrib import admin
+from django.core.cache import cache
+from django.db import connection
 from django.urls import path, include
 from django.http import JsonResponse, HttpResponse
 
@@ -11,7 +15,30 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, Sp
 
 
 def health_view(_request):
-    return JsonResponse({"status": "ok", "app": "Quicksurf", "version": "1.0"})
+    """For uptime monitors: 200 when the database answers, 503 when it doesn't. The cache is reported too."""
+    checks = {}
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        checks["database"] = "ok"
+    except Exception:
+        checks["database"] = "error"
+    try:
+        cache.set("health-check", "ok", 10)
+        checks["cache"] = "ok" if cache.get("health-check") == "ok" else "error"
+    except Exception:
+        checks["cache"] = "error"
+
+    healthy = checks["database"] == "ok"
+    return JsonResponse(
+        {
+            "status": "ok" if healthy else "error",
+            "app": "Quicksurf",
+            "version": os.environ.get("RENDER_GIT_COMMIT", "dev")[:12],
+            "checks": checks,
+        },
+        status=200 if healthy else 503,
+    )
 
 
 urlpatterns = [

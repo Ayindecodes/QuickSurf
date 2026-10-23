@@ -4,8 +4,7 @@ from decimal import Decimal
 from decouple import config, Csv
 from django.core.exceptions import ImproperlyConfigured
 import dj_database_url
-import os
-import logging  # NEW
+import logging
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -142,6 +141,9 @@ WSGI_APPLICATION = "quicksurf.wsgi.application"
 # -------------------------------------------------------------------
 # Database (Render/Heroku-style via DATABASE_URL)
 # -------------------------------------------------------------------
+if IS_PRODUCTION and not config("DATABASE_URL", default=""):
+    raise ImproperlyConfigured("DATABASE_URL is required when ENV is production (it would fall back to SQLite).")
+
 DATABASES = {
     "default": dj_database_url.config(
         default=config("DATABASE_URL", default=f"sqlite:///{BASE_DIR/'db.sqlite3'}"),
@@ -325,16 +327,31 @@ ACCOUNT_LOGOUT_REDIRECT_URL = "/accounts/login/"
 # -------------------------------------------------------------------
 # Providers config (read from .env)
 # -------------------------------------------------------------------
-PROVIDER_MODE = config("PROVIDER_MODE", default="LIVE").upper()  # LIVE | MOCK
+# LIVE sells real airtime/data through vtpass.com; SANDBOX (old name: MOCK) uses sandbox.vtpass.com.
+# Production must choose explicitly; everywhere else it defaults to SANDBOX so no one spends real money by accident.
+PROVIDER_MODE = config("PROVIDER_MODE", default="" if IS_PRODUCTION else "SANDBOX").strip().upper()
+if PROVIDER_MODE == "MOCK":
+    PROVIDER_MODE = "SANDBOX"
+if PROVIDER_MODE not in {"LIVE", "SANDBOX"}:
+    raise ImproperlyConfigured("PROVIDER_MODE must be LIVE or SANDBOX (it is required when ENV is production).")
 
 # VTpass
 # keep without trailing slash; code will append endpoints like /balance, /pay
-VTPASS_BASE_URL = config("VTPASS_BASE_URL", default="https://vtpass.com/api").rstrip("/")
-VTPASS_EMAIL = config("VTPASS_EMAIL", default="")
+VTPASS_BASE_URL = config(
+    "VTPASS_BASE_URL",
+    default="https://vtpass.com/api" if PROVIDER_MODE == "LIVE" else "https://sandbox.vtpass.com/api",
+).rstrip("/")
 VTPASS_API_KEY = config("VTPASS_API_KEY", default="")
 VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
 VTPASS_SECRET_KEY = config("VTPASS_SECRET_KEY", default="")
-VTPASS_IP_WHITELISTED = env_bool("VTPASS_IP_WHITELISTED", default=False)
+
+if IS_PRODUCTION and PROVIDER_MODE == "LIVE":
+    _missing = [name for name, value in (("VTPASS_API_KEY", VTPASS_API_KEY), ("VTPASS_PUBLIC_KEY", VTPASS_PUBLIC_KEY),
+                                         ("VTPASS_SECRET_KEY", VTPASS_SECRET_KEY)) if not value]
+    if _missing:
+        raise ImproperlyConfigured(f"PROVIDER_MODE is LIVE but these are missing: {', '.join(_missing)}.")
+    if "sandbox" in VTPASS_BASE_URL:
+        raise ImproperlyConfigured("PROVIDER_MODE is LIVE but VTPASS_BASE_URL points at the VTpass sandbox.")
 
 # Paystack (for wallet funding)
 PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
@@ -354,9 +371,6 @@ if IS_PRODUCTION and not PAYSTACK_SECRET_KEY.startswith("sk_live_"):
 POINTS_PER_NAIRA = config("POINTS_PER_NAIRA", default="0.01")
 REWARDS_ENABLED = env_bool("REWARDS_ENABLED", default=True)
 RECEIPT_EMAILS_ENABLED = env_bool("RECEIPT_EMAILS_ENABLED", default=True)
-
-# >>> NEW: allow LIVE tests even if internal wallet is 0.00
-ALLOW_PROVIDER_DIRECT_CHARGE = env_bool("ALLOW_PROVIDER_DIRECT_CHARGE", default=False)
 
 # Kill switches: set to False on Render to stop new purchases or top-ups without a code change.
 # Payment verify and the Paystack webhook stay on, so payments already made are still credited.
@@ -393,4 +407,4 @@ LOGGING = {
 
 # >>> NEW: print a clear boot line so you can verify LIVE mode in Render logs
 logger = logging.getLogger(__name__)
-logger.warning(f"BOOT ENV={ENV} DEBUG={DEBUG} PROVIDER_MODE={PROVIDER_MODE} VTPASS_BASE_URL={VTPASS_BASE_URL} DIRECT_CHARGE={ALLOW_PROVIDER_DIRECT_CHARGE} PURCHASES_ENABLED={PURCHASES_ENABLED} TOPUPS_ENABLED={TOPUPS_ENABLED}")
+logger.warning(f"BOOT ENV={ENV} DEBUG={DEBUG} PROVIDER_MODE={PROVIDER_MODE} VTPASS_BASE_URL={VTPASS_BASE_URL} PURCHASES_ENABLED={PURCHASES_ENABLED} TOPUPS_ENABLED={TOPUPS_ENABLED}")
