@@ -1,20 +1,24 @@
 # payments/views.py
 import uuid
 from decimal import Decimal
+
 from django.conf import settings
-from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework import serializers as drf_serializers
+from django.views.decorators.csrf import csrf_exempt
 from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
+from rest_framework import status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.throttling import SafeAnonRateThrottle, SafeUserRateThrottle, TopupRateThrottle
+
 from .models import PaymentIntent
+from .paystack import initialize as ps_initialize
+from .paystack import valid_webhook
+from .paystack import verify as ps_verify
 from .serializers import PaymentInitRequestSerializer
-from .paystack import initialize as ps_initialize, verify as ps_verify, valid_webhook
 from .services import (
     FINAL_STATUSES,
     apply_verification,
@@ -61,6 +65,7 @@ DetailSchema = inline_serializer(
     name="DetailResponse",
     fields={"detail": drf_serializers.CharField()},
 )
+
 
 class PaymentInitView(APIView):
     permission_classes = [IsAuthenticated]
@@ -111,7 +116,9 @@ class PaymentInitView(APIView):
             intent.init_response = err_body
             intent.status = "failed"
             intent.save(update_fields=["init_response", "status", "updated"])
-            return Response({"detail": "Payment provider unavailable. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"detail": "Payment provider unavailable. Please try again."}, status=status.HTTP_502_BAD_GATEWAY
+            )
         log_paystack(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, body, code)
 
         # Defensive parse
@@ -124,13 +131,19 @@ class PaymentInitView(APIView):
         intent.save(update_fields=["authorization_url", "access_code", "init_response", "status", "updated"])
 
         if not initialized:
-            return Response({"detail": "Unable to initialize payment at this time."}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"detail": "Unable to initialize payment at this time."}, status=status.HTTP_502_BAD_GATEWAY
+            )
 
-        return Response({
-            "reference": intent.reference,
-            "authorization_url": intent.authorization_url,
-            "status": intent.status,
-        }, status=status.HTTP_201_CREATED)
+        return Response(
+            {
+                "reference": intent.reference,
+                "authorization_url": intent.authorization_url,
+                "status": intent.status,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
 
 class PaymentVerifyView(APIView):
     permission_classes = [IsAuthenticated]
@@ -156,7 +169,9 @@ class PaymentVerifyView(APIView):
         try:
             code, body = ps_verify(reference)
         except Exception:
-            return Response({"detail": "Payment verification unavailable. Please retry."}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"detail": "Payment verification unavailable. Please retry."}, status=status.HTTP_502_BAD_GATEWAY
+            )
         body = trim_payload(body)
         log_paystack(request.user, reference, "/transaction/verify", None, body, code)
 
@@ -168,6 +183,7 @@ class PaymentVerifyView(APIView):
         if result == "success":
             response["credited"] = credited
         return Response(response)
+
 
 @method_decorator(csrf_exempt, name="dispatch")
 class PaystackWebhookView(APIView):
@@ -204,7 +220,7 @@ class PaystackWebhookView(APIView):
 
         # Attach webhook (append behaviour)
         try:
-            events = (intent.webhook_events or [])
+            events = intent.webhook_events or []
             events.append(stored)
             intent.webhook_events = events
             intent.save(update_fields=["webhook_events", "updated"])

@@ -1,10 +1,11 @@
-from pathlib import Path
+import logging
 from datetime import timedelta
 from decimal import Decimal
-from decouple import config, Csv
-from django.core.exceptions import ImproperlyConfigured
+from pathlib import Path
+
 import dj_database_url
-import logging
+from decouple import Csv, config
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -40,6 +41,7 @@ def normalize_env(value: str | None) -> str:
         "local": "development",
     }
     return aliases.get(raw, raw)
+
 
 # -------------------------------------------------------------------
 # Core / Environment
@@ -79,7 +81,6 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.sites",
-
     # Third-party
     "allauth",
     "allauth.account",
@@ -91,7 +92,6 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "corsheaders",
     "django_filters",
-
     # Project apps
     "users.apps.UsersConfig",
     "wallets",
@@ -108,9 +108,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-
     "corsheaders.middleware.CorsMiddleware",
-
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -152,7 +150,7 @@ if IS_PRODUCTION and not config("DATABASE_URL", default=""):
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=config("DATABASE_URL", default=f"sqlite:///{BASE_DIR/'db.sqlite3'}"),
+        default=config("DATABASE_URL", default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"),
         conn_max_age=600,
         ssl_require=env_bool("DB_SSL_REQUIRE", default=IS_PRODUCTION),
     )
@@ -255,15 +253,12 @@ EMAIL_TIMEOUT = 10
 # -------------------------------------------------------------------
 REST_FRAMEWORK = {
     # Bearer tokens only: no session cookies, so no CSRF exposure from other sites.
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
-    ),
-    "DEFAULT_PERMISSION_CLASSES": (
-        "rest_framework.permissions.IsAuthenticated",
-    ),
+    "DEFAULT_AUTHENTICATION_CLASSES": ("rest_framework_simplejwt.authentication.JWTAuthentication",),
+    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": (
         ("rest_framework.renderers.JSONRenderer", "rest_framework.renderers.BrowsableAPIRenderer")
-        if DEBUG else ("rest_framework.renderers.JSONRenderer",)
+        if DEBUG
+        else ("rest_framework.renderers.JSONRenderer",)
     ),
     "EXCEPTION_HANDLER": "core.exceptions.api_exception_handler",
     "DEFAULT_THROTTLE_CLASSES": [
@@ -275,13 +270,13 @@ REST_FRAMEWORK = {
         "anon": config("DRF_ANON_THROTTLE", default="100/day"),
         # Per IP (core.net.client_ip) unless noted
         "login": "20/minute",
-        "login_email": "10/hour",       # per email address
+        "login_email": "10/hour",  # per email address
         "register": "20/hour",
         "password_reset": "10/hour",
         "verify_email": "10/hour",
         "pin_change": "10/hour",
         "purchase": config("PURCHASE_RATE", default="30/hour"),  # per user
-        "topup": config("TOPUP_RATE", default="20/hour"),        # per user
+        "topup": config("TOPUP_RATE", default="20/hour"),  # per user
     },
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
@@ -298,6 +293,7 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "Airtime/Data purchases with wallet + providers",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    "PREPROCESSING_HOOKS": ["core.schema.canonical_paths_only"],
 }
 
 # -------------------------------------------------------------------
@@ -382,8 +378,15 @@ VTPASS_PUBLIC_KEY = config("VTPASS_PUBLIC_KEY", default="")
 VTPASS_SECRET_KEY = config("VTPASS_SECRET_KEY", default="")
 
 if IS_PRODUCTION and PROVIDER_MODE == "LIVE":
-    _missing = [name for name, value in (("VTPASS_API_KEY", VTPASS_API_KEY), ("VTPASS_PUBLIC_KEY", VTPASS_PUBLIC_KEY),
-                                         ("VTPASS_SECRET_KEY", VTPASS_SECRET_KEY)) if not value]
+    _missing = [
+        name
+        for name, value in (
+            ("VTPASS_API_KEY", VTPASS_API_KEY),
+            ("VTPASS_PUBLIC_KEY", VTPASS_PUBLIC_KEY),
+            ("VTPASS_SECRET_KEY", VTPASS_SECRET_KEY),
+        )
+        if not value
+    ]
     if _missing:
         raise ImproperlyConfigured(f"PROVIDER_MODE is LIVE but these are missing: {', '.join(_missing)}.")
     if "sandbox" in VTPASS_BASE_URL:
@@ -449,4 +452,6 @@ LOGGING = {
 
 # >>> NEW: print a clear boot line so you can verify LIVE mode in Render logs
 logger = logging.getLogger(__name__)
-logger.warning(f"BOOT ENV={ENV} DEBUG={DEBUG} PROVIDER_MODE={PROVIDER_MODE} VTPASS_BASE_URL={VTPASS_BASE_URL} PURCHASES_ENABLED={PURCHASES_ENABLED} TOPUPS_ENABLED={TOPUPS_ENABLED}")
+logger.warning(
+    f"BOOT ENV={ENV} DEBUG={DEBUG} PROVIDER_MODE={PROVIDER_MODE} VTPASS_BASE_URL={VTPASS_BASE_URL} PURCHASES_ENABLED={PURCHASES_ENABLED} TOPUPS_ENABLED={TOPUPS_ENABLED}"
+)

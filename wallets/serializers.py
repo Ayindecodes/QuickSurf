@@ -1,6 +1,7 @@
-from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Wallet, Transaction
+from rest_framework import serializers
+
+from .models import Transaction, Wallet
 
 User = get_user_model()
 
@@ -8,13 +9,13 @@ User = get_user_model()
 class WalletBalanceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Wallet
-        fields = ('balance', 'locked')
+        fields = ("balance", "locked")
 
 
 class TransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transaction
-        fields = ('id', 'amount', 'type', 'timestamp', 'reference', 'balance_after')
+        fields = ("id", "amount", "type", "timestamp", "reference", "balance_after")
 
 
 class AdjustmentSerializer(serializers.Serializer):

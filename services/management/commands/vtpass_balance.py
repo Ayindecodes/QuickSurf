@@ -16,8 +16,9 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
-        parser.add_argument("--warn-below", type=Decimal, default=Decimal("10000"),
-                            help="Alert threshold in naira (default: 10000)")
+        parser.add_argument(
+            "--warn-below", type=Decimal, default=Decimal("10000"), help="Alert threshold in naira (default: 10000)"
+        )
 
     def handle(self, *args, **opts):
         balance = get_balance()

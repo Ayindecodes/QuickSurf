@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from decimal import Decimal
 import re
+from decimal import Decimal
 from typing import Set
 
 from django.conf import settings
 from rest_framework import serializers
 
 from .models import (
-    AirtimeTransaction,
-    DataTransaction,
     NETWORK_CHOICES,
     STATUS_CHOICES,
+    AirtimeTransaction,
+    DataTransaction,
 )
 
 # ---------------------------------------------------------------------------
@@ -22,7 +22,7 @@ STATUS_KEYS = {k for k, _ in STATUS_CHOICES}
 
 # VTpass sandbox "magic" numbers used to simulate outcomes for airtime
 SANDBOX_MAGIC_NUMBERS: Set[str] = {
-    "08011111111",   # success
+    "08011111111",  # success
     "201000000000",  # pending
     "500000000000",  # unexpected response
     "400000000000",  # no response
@@ -34,6 +34,7 @@ ALLOW_SANDBOX_NUMBERS = str(getattr(settings, "PROVIDER_MODE", "LIVE")).upper() 
 # ---------------------------------------------------------------------------
 # Phone normalization
 # ---------------------------------------------------------------------------
+
 
 def normalize_ng_phone(raw: str) -> str:
     """
@@ -155,17 +156,13 @@ class AirtimePurchaseRequestSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     "Enter a valid NG number like 0703xxxxxxx/+234703xxxxxxx, or use VTpass sandbox test numbers."
                 )
-            raise serializers.ValidationError(
-                "Enter a valid Nigerian number like 0703xxxxxxx or +234703xxxxxxx."
-            )
+            raise serializers.ValidationError("Enter a valid Nigerian number like 0703xxxxxxx or +234703xxxxxxx.")
         return normalized
 
     def validate_client_reference(self, v: str):
         v = (v or "").strip() or None
         if v and not CLIENT_REF_RE.match(v):
-            raise serializers.ValidationError(
-                "client_reference contains invalid characters or is too long (max 64)."
-            )
+            raise serializers.ValidationError("client_reference contains invalid characters or is too long (max 64).")
         return v
 
 
@@ -197,9 +194,7 @@ class DataPurchaseRequestSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     "Enter a valid NG number like 0703xxxxxxx/+234703xxxxxxx, or use VTpass sandbox test numbers."
                 )
-            raise serializers.ValidationError(
-                "Enter a valid Nigerian number like 0703xxxxxxx or +234703xxxxxxx."
-            )
+            raise serializers.ValidationError("Enter a valid Nigerian number like 0703xxxxxxx or +234703xxxxxxx.")
         return normalized
 
     def validate_plan(self, v: str):
@@ -210,8 +205,5 @@ class DataPurchaseRequestSerializer(serializers.Serializer):
     def validate_client_reference(self, v: str):
         v = (v or "").strip() or None
         if v and not CLIENT_REF_RE.match(v):
-            raise serializers.ValidationError(
-                "client_reference contains invalid characters or is too long (max 64)."
-            )
+            raise serializers.ValidationError("client_reference contains invalid characters or is too long (max 64).")
         return v
-

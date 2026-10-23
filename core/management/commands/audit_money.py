@@ -21,8 +21,14 @@ SECTION_TITLES = {
     "unknown_outcome_refund": "Purchases refunded without a clear VTpass answer (may have been delivered)",
     "failure_codes": "Failed purchases by VTpass response code",
 }
-LABELS = {"user": "user", "reference": "ref", "status": "status", "amount": "amount",
-          "compare_amount": "vs", "difference": "diff"}
+LABELS = {
+    "user": "user",
+    "reference": "ref",
+    "status": "status",
+    "amount": "amount",
+    "compare_amount": "vs",
+    "difference": "diff",
+}
 
 
 class Command(BaseCommand):
@@ -71,8 +77,11 @@ class Command(BaseCommand):
             pending[user_id] += amount
 
         ledger = defaultdict(lambda: defaultdict(lambda: ZERO))
-        rows = Transaction.objects.order_by().values("wallet_id", "type").annotate(
-            total=Sum("amount"), delta=Sum("balance_delta"))
+        rows = (
+            Transaction.objects.order_by()
+            .values("wallet_id", "type")
+            .annotate(total=Sum("amount"), delta=Sum("balance_delta"))
+        )
         for row in rows:
             # Adjustments go either way, so use their signed delta rather than the amount.
             value = row["delta"] if row["type"] == Transaction.TYPE_ADJUSTMENT else row["total"]
@@ -80,29 +89,54 @@ class Command(BaseCommand):
 
         for wallet in Wallet.objects.select_related("user").order_by("id"):
             moves = ledger[wallet.id]
-            expected = (topups[wallet.user_id] + moves["credit"] + moves["adjustment"] + moves["lock"]
-                        - moves["unlock"] - spent[wallet.user_id])
+            expected = (
+                topups[wallet.user_id]
+                + moves["credit"]
+                + moves["adjustment"]
+                + moves["lock"]
+                - moves["unlock"]
+                - spent[wallet.user_id]
+            )
             actual = wallet.balance + wallet.locked
             if actual == expected:
                 continue
-            detail = (f"balance {wallet.balance}, locked {wallet.locked}, "
-                      f"pending purchases {pending[wallet.user_id]}")
+            detail = f"balance {wallet.balance}, locked {wallet.locked}, pending purchases {pending[wallet.user_id]}"
             if wallet.locked != pending[wallet.user_id]:
                 detail += "; locked doesn't match pending purchases"
-            yield _row("wallet_mismatch", wallet.user, f"wallet {wallet.id}", amount=actual,
-                       compare_amount=expected, difference=actual - expected, detail=detail)
+            yield _row(
+                "wallet_mismatch",
+                wallet.user,
+                f"wallet {wallet.id}",
+                amount=actual,
+                compare_amount=expected,
+                difference=actual - expected,
+                detail=detail,
+            )
 
     def _underpriced_data(self):
         for txn in DataTransaction.objects.filter(status__in=["successful", "pending"]).select_related("user"):
             vtpass_amount = _vtpass_amount(txn.raw_response)
             if vtpass_amount is None:
                 if txn.status == "successful":
-                    yield _row("data_no_vtpass_amount", txn.user, txn.client_reference, txn.status, txn.amount,
-                               detail=f"plan {txn.plan}")
+                    yield _row(
+                        "data_no_vtpass_amount",
+                        txn.user,
+                        txn.client_reference,
+                        txn.status,
+                        txn.amount,
+                        detail=f"plan {txn.plan}",
+                    )
             elif txn.amount < vtpass_amount:
-                yield _row("underpriced_data", txn.user, txn.client_reference, txn.status, txn.amount,
-                           compare_amount=vtpass_amount, difference=txn.amount - vtpass_amount,
-                           detail=f"plan {txn.plan}")
+                yield _row(
+                    "underpriced_data",
+                    txn.user,
+                    txn.client_reference,
+                    txn.status,
+                    txn.amount,
+                    compare_amount=vtpass_amount,
+                    difference=txn.amount - vtpass_amount,
+                    detail=f"plan {txn.plan}",
+                )
 
     def _paystack_multi_credits(self):
         """
@@ -111,8 +145,11 @@ class Command(BaseCommand):
         An estimate: confirm against the same user's wallet_mismatch row.
         """
         events = defaultdict(list)
-        logs = (ProviderLog.objects.filter(service_type="paystack").order_by("timestamp", "id")
-                .values_list("client_reference", "endpoint", "status_code", "response_payload"))
+        logs = (
+            ProviderLog.objects.filter(service_type="paystack")
+            .order_by("timestamp", "id")
+            .values_list("client_reference", "endpoint", "status_code", "response_payload")
+        )
         for reference, endpoint, status_code, body in logs.iterator():
             event = _paystack_event(endpoint, status_code, body)
             if event:
@@ -121,9 +158,16 @@ class Command(BaseCommand):
         for intent in PaymentIntent.objects.filter(reference__in=list(events)).select_related("user"):
             credits = _count_old_credits(events[intent.reference])
             if credits > 1:
-                yield _row("paystack_multi_credit", intent.user, intent.reference, intent.status, intent.amount,
-                           compare_amount=intent.amount * credits, difference=intent.amount * (credits - 1),
-                           detail=f"credited about {credits} times")
+                yield _row(
+                    "paystack_multi_credit",
+                    intent.user,
+                    intent.reference,
+                    intent.status,
+                    intent.amount,
+                    compare_amount=intent.amount * credits,
+                    difference=intent.amount * (credits - 1),
+                    detail=f"credited about {credits} times",
+                )
 
     def _unknown_outcome_refunds(self):
         """Failed (refunded) purchases where VTpass gave no response code or we hit a network error (999)."""
@@ -131,8 +175,14 @@ class Command(BaseCommand):
             for txn in model.objects.filter(status="failed").select_related("user"):
                 code = _vtpass_code(txn.raw_response)
                 if code in (None, "999"):
-                    yield _row("unknown_outcome_refund", txn.user, txn.client_reference, f"{label} failed",
-                               txn.amount, detail=f"VTpass code {code or 'missing'}; check this request with VTpass")
+                    yield _row(
+                        "unknown_outcome_refund",
+                        txn.user,
+                        txn.client_reference,
+                        f"{label} failed",
+                        txn.amount,
+                        detail=f"VTpass code {code or 'missing'}; check this request with VTpass",
+                    )
 
     def _failure_codes(self):
         """Failed purchases grouped by VTpass code. One dominant code usually means a setup problem."""
@@ -146,8 +196,13 @@ class Command(BaseCommand):
                     group["description"] = str(raw.get("response_description") or "")[:60]
 
         for (label, code), group in sorted(groups.items(), key=lambda item: -item[1]["count"]):
-            yield _row("failure_codes", reference=code, status=label, amount=group["total"],
-                       detail=f"{group['count']} failed: {group['description']}")
+            yield _row(
+                "failure_codes",
+                reference=code,
+                status=label,
+                amount=group["total"],
+                detail=f"{group['count']} failed: {group['description']}",
+            )
 
     def _write_report(self, rows):
         by_section = defaultdict(list)
@@ -219,8 +274,12 @@ def _paystack_event(endpoint, status_code, body):
         return None
     body = body if isinstance(body, dict) else {}
     data = body.get("data") if isinstance(body.get("data"), dict) else {}
-    if (status_code == "200" and body.get("status") and data.get("status") == "success"
-            and data.get("currency") == "NGN"):
+    if (
+        status_code == "200"
+        and body.get("status")
+        and data.get("status") == "success"
+        and data.get("currency") == "NGN"
+    ):
         return "success"
     if data.get("status") in ("failed", "abandoned"):
         return "failed"

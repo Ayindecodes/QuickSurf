@@ -15,8 +15,14 @@ class StaffMFAMiddleware:
 
     def __call__(self, request):
         user = getattr(request, "user", None)
-        if (settings.STAFF_MFA_REQUIRED and request.path.startswith(f"/{settings.ADMIN_URL}")
-                and user is not None and user.is_authenticated and user.is_staff and not _has_totp(user)):
+        if (
+            settings.STAFF_MFA_REQUIRED
+            and request.path.startswith(f"/{settings.ADMIN_URL}")
+            and user is not None
+            and user.is_authenticated
+            and user.is_staff
+            and not _has_totp(user)
+        ):
             return redirect(f"{reverse('mfa_activate_totp')}?next={request.path}")
         return self.get_response(request)
 

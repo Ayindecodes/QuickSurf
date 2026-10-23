@@ -2,6 +2,7 @@ import logging
 
 from django.conf import settings
 from django.core.mail import send_mail
+
 from .models import EmailLog
 
 logger = logging.getLogger(__name__)
@@ -12,8 +13,9 @@ def send_email(to_email: str, subject: str, body: str, log_body: str | None = No
     Send an email now and record it in EmailLog. Pass log_body to store different text than was
     sent (e.g. with a one-time code hidden). Returns whether it was sent.
     """
-    log = EmailLog.objects.create(to=to_email, subject=subject, body=body if log_body is None else log_body,
-                                  status="queued")
+    log = EmailLog.objects.create(
+        to=to_email, subject=subject, body=body if log_body is None else log_body, status="queued"
+    )
     try:
         send_mail(subject, body, None, [to_email], fail_silently=False)
         log.status = "sent"

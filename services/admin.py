@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover
 # Helpers
 # -----------------------------
 
+
 def _mask_phone(s: str | None) -> str:
     s = str(s or "")
     return f"****{s[-4:]}" if len(s) >= 4 else "****"
@@ -92,7 +93,9 @@ class AirtimeTransactionAdmin(admin.ModelAdmin):
                 outcome = strict_map_outcome(body)
                 if outcome in FINAL_STATUSES and outcome != tx.status:
                     # Moves the wallet money too (capture or refund), once; settle_purchase enforces the rules.
-                    settled = settle_purchase(tx, outcome, provider_status=body.get("response_description") or tx.provider_status)
+                    settled = settle_purchase(
+                        tx, outcome, provider_status=body.get("response_description") or tx.provider_status
+                    )
                     updated += settled.status != tx.status
             except Exception as e:  # pragma: no cover
                 self.message_user(request, f"Error on {tx.client_reference}: {e}", level=messages.ERROR)
@@ -165,7 +168,9 @@ class DataTransactionAdmin(admin.ModelAdmin):
                 outcome = strict_map_outcome(body)
                 if outcome in FINAL_STATUSES and outcome != tx.status:
                     # Moves the wallet money too (capture or refund), once; settle_purchase enforces the rules.
-                    settled = settle_purchase(tx, outcome, provider_status=body.get("response_description") or tx.provider_status)
+                    settled = settle_purchase(
+                        tx, outcome, provider_status=body.get("response_description") or tx.provider_status
+                    )
                     updated += settled.status != tx.status
             except Exception as e:  # pragma: no cover
                 self.message_user(request, f"Error on {tx.client_reference}: {e}", level=messages.ERROR)
@@ -205,4 +210,3 @@ class ProviderLogAdmin(admin.ModelAdmin):
     @admin.display(description="Response (first 120 chars)")
     def response_preview(self, obj: ProviderLog):
         return _short(obj.response_payload, 120)
-

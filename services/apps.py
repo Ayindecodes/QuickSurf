@@ -6,7 +6,7 @@ from importlib import import_module
 from django.apps import AppConfig
 from django.conf import settings
 from django.core.cache import caches
-from django.core.checks import register, Warning, Error
+from django.core.checks import Error, Warning, register
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,9 @@ def services_system_checks(app_configs, **kwargs):
     provider_mode = str(getattr(settings, "PROVIDER_MODE", "SANDBOX")).upper()
 
     if provider_mode == "LIVE":
-        missing = [k for k in ("VTPASS_API_KEY", "VTPASS_PUBLIC_KEY", "VTPASS_SECRET_KEY")
-                   if not getattr(settings, k, "")]
+        missing = [
+            k for k in ("VTPASS_API_KEY", "VTPASS_PUBLIC_KEY", "VTPASS_SECRET_KEY") if not getattr(settings, k, "")
+        ]
         if missing:
             messages.append(
                 Warning(
@@ -100,6 +101,7 @@ def services_system_checks(app_configs, **kwargs):
     # 4) JWT lifetime guardrail (optional recommendation)
     try:
         from rest_framework_simplejwt.settings import api_settings as jwt_settings
+
         access_minutes = int(jwt_settings.ACCESS_TOKEN_LIFETIME.total_seconds() // 60)
         if access_minutes < 60:
             messages.append(
@@ -114,4 +116,3 @@ def services_system_checks(app_configs, **kwargs):
         pass
 
     return messages
-

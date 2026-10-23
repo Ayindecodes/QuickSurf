@@ -1,11 +1,12 @@
-from django.db import models
 from django.conf import settings
+from django.db import models
+
 
 class LoyaltyLedger(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="loyalty_entries")
     points = models.PositiveIntegerField()
     reason = models.CharField(max_length=128)
-    txn_type = models.CharField(max_length=16, choices=[("airtime","Airtime"),("data","Data")])
+    txn_type = models.CharField(max_length=16, choices=[("airtime", "Airtime"), ("data", "Data")])
     txn_id = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -9,9 +9,11 @@ purchase views) and is then settled exactly once:
 Successful, failed and reversed are final. The one exception is successful -> reversed, because
 VTpass can reverse a purchase after reporting it delivered.
 """
+
 from django.db import transaction
 
 from wallets import services as wallet_services
+
 from .models import AirtimeTransaction
 
 FINAL_STATUSES = {"successful", "failed", "reversed"}
