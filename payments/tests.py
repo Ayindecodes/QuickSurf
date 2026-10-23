@@ -22,7 +22,7 @@ from rest_framework import status
 from rest_framework.test import APIClient, APITestCase, APITransactionTestCase
 
 from payments.models import PaymentIntent
-from payments.paystack import initialize, kobo, verify
+from payments.paystack import initialize, kobo, list_successful, verify
 from payments.services import credit_wallet_once
 from services.models import ProviderLog
 from users.models import User
@@ -422,6 +422,20 @@ class PaystackClientTests(SimpleTestCase):
         )
         self.assertEqual(sent["headers"]["Authorization"], "Bearer sk_test_dummy")
         self.assertEqual((code, body["status"]), (200, True))
+
+    def test_listing_successful_payments_reads_every_page(self):
+        pages = [
+            _paystack_http(200, {"status": True, "data": [{"reference": "A"}], "meta": {"pageCount": 2}}),
+            _paystack_http(200, {"status": True, "data": [{"reference": "B"}], "meta": {"pageCount": 2}}),
+        ]
+        start = timezone.now() - timedelta(days=1)
+
+        with patch("payments.paystack.requests.get", side_effect=pages) as get:
+            found = list_successful(start, timezone.now())
+
+        self.assertEqual([tx["reference"] for tx in found], ["A", "B"])
+        self.assertEqual([c.kwargs["params"]["page"] for c in get.call_args_list], [1, 2])
+        self.assertEqual(get.call_args.kwargs["params"]["status"], "success")
 
     def test_verify_handles_a_non_json_error_page(self):
         with patch("payments.paystack.requests.get", return_value=_paystack_http(502, text="<html>Bad gateway</html>")):
