@@ -340,6 +340,12 @@ PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
 PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
 PAYSTACK_BASE_URL = config("PAYSTACK_BASE_URL", default="https://api.paystack.co")
 PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="")  # HMAC verification
+# Where Paystack sends the user after checkout (a frontend page that calls /api/payments/verify/).
+# Empty: use the callback URL set in the Paystack dashboard.
+PAYSTACK_CALLBACK_URL = config("PAYSTACK_CALLBACK_URL", default="").strip()
+
+if IS_PRODUCTION and not PAYSTACK_SECRET_KEY.startswith("sk_live_"):
+    raise ImproperlyConfigured("PAYSTACK_SECRET_KEY must be a live key (sk_live_...) when ENV is production.")
 
 # -------------------------------------------------------------------
 # Feature toggles
