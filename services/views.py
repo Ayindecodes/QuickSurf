@@ -268,7 +268,7 @@ def _daily_limit_exceeded(user, amount: Decimal) -> int:
 
 def _daily_limit_response(limit: int):
     return Response(
-        {"error": f"Daily purchase limit of ₦{limit:,} reached. Try again tomorrow."},
+        {"error": f"Daily purchase limit of ₦{limit:,} reached. Try again tomorrow.", "code": "daily_limit"},
         status=status.HTTP_400_BAD_REQUEST,
     )
 
@@ -289,7 +289,10 @@ PURCHASE_ERROR = "Something went wrong with this purchase. If money was held, it
 
 
 def _reference_taken_response():
-    return Response({"error": "This client_reference is already in use."}, status=status.HTTP_409_CONFLICT)
+    return Response(
+        {"error": "This client_reference is already in use.", "code": "reference_in_use"},
+        status=status.HTTP_409_CONFLICT,
+    )
 
 
 # ---------- Requery ----------
@@ -321,7 +324,7 @@ def _refresh_from_vtpass(txn):
 # ---------- Kill switch ----------
 def _purchases_paused_response():
     return Response(
-        {"error": "Purchases are temporarily unavailable. Please try again later."},
+        {"error": "Purchases are temporarily unavailable. Please try again later.", "code": "purchases_paused"},
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
 
@@ -371,7 +374,7 @@ class AirtimePurchaseView(APIView):
         k_line = _lock_key_line(user.id, "airtime", network, phone)
         if not _acquire_purchase_locks(k_ref, k_line):
             return Response(
-                {"detail": "Another purchase is in progress for this reference/line."},
+                {"detail": "Another purchase is in progress for this reference/line.", "code": "purchase_in_progress"},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
@@ -410,7 +413,10 @@ class AirtimePurchaseView(APIView):
                 try:
                     wallet_services.hold(user, amt, ledger_reference("airtime", client_ref))
                 except wallet_services.InsufficientFunds:
-                    return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response(
+                        {"error": "Insufficient funds.", "code": "insufficient_funds"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
                 txn = AirtimeTransaction.objects.create(
                     user=user,
@@ -502,7 +508,7 @@ class DataPurchaseView(APIView):
         k_line = _lock_key_line(user.id, "data", network, phone)
         if not _acquire_purchase_locks(k_ref, k_line):
             return Response(
-                {"detail": "Another purchase is in progress for this reference/line."},
+                {"detail": "Another purchase is in progress for this reference/line.", "code": "purchase_in_progress"},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
@@ -529,16 +535,24 @@ class DataPurchaseView(APIView):
                 amt = _data_plan_price(network, plan)
             except PlanPricingUnavailable:
                 return Response(
-                    {"error": "Unable to price this data plan right now. Please try again."},
+                    {
+                        "error": "Unable to price this data plan right now. Please try again.",
+                        "code": "plans_unavailable",
+                    },
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             if amt is None:
                 return Response(
-                    {"error": f"Unknown data plan '{plan}' for {network}."}, status=status.HTTP_400_BAD_REQUEST
+                    {"error": f"Unknown data plan '{plan}' for {network}.", "code": "unknown_plan"},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
             if requested_amt is not None and Decimal(str(requested_amt)) != amt:
                 return Response(
-                    {"error": "Amount does not match the current price for this plan.", "price": str(amt)},
+                    {
+                        "error": "Amount does not match the current price for this plan.",
+                        "code": "price_changed",
+                        "price": str(amt),
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -555,7 +569,10 @@ class DataPurchaseView(APIView):
                 try:
                     wallet_services.hold(user, amt, ledger_reference("data", client_ref))
                 except wallet_services.InsufficientFunds:
-                    return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response(
+                        {"error": "Insufficient funds.", "code": "insufficient_funds"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
                 txn = DataTransaction.objects.create(
                     user=user,
@@ -680,7 +697,7 @@ class DataPlansView(APIView):
                 ]
             except PlanPricingUnavailable:
                 return Response(
-                    {"detail": "Data plans are unavailable right now. Please try again."},
+                    {"detail": "Data plans are unavailable right now. Please try again.", "code": "plans_unavailable"},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             try:
