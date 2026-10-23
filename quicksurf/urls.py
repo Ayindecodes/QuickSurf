@@ -47,25 +47,29 @@ def health_view(_request):
 # Staff sign in to the admin through allauth, which asks for their authenticator code.
 admin.site.login = secure_admin_login(admin.site.login)
 
+# The customer API. Documented and versioned at /api/v1/; also served unchanged at /api/ so existing
+# clients and the Paystack/VTpass callback URLs set in their dashboards keep working.
+api_patterns = [
+    path("token/", LoggingTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("users/", include("users.urls")),
+    path("", include("wallets.urls")),
+    path("services/", include("services.urls")),
+    path("payments/", include("payments.urls")),
+    path("rewards/", include("rewards.urls")),
+    path("health/", health_view, name="health"),
+]
+
 urlpatterns = [
     # --- Admin (path set by ADMIN_URL) ---
     path(settings.ADMIN_URL, admin.site.urls),
     # --- Allauth: staff sign-in and 2FA setup for the admin (public signup is closed) ---
     path("accounts/", include("allauth.urls")),
-    # --- JWT Authentication ---
-    path("api/token/", LoggingTokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    # --- Users & Wallets ---
-    path("api/users/", include("users.urls")),
-    path("api/", include("wallets.urls")),
-    # --- Services (airtime & data) ---
-    path("api/services/", include("services.urls")),
-    # --- Payments (Paystack init/webhook) ---
-    path("api/payments/", include("payments.urls")),
-    # --- Health ---
-    path("api/health/", health_view, name="health"),
-    # --- API Schema + Docs ---
+    # --- API Schema + Docs (they describe /api/v1/) ---
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
+    # --- API ---
+    path("api/v1/", include((api_patterns, "v1"))),
+    path("api/", include(api_patterns)),
 ]

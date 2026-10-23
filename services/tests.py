@@ -22,8 +22,8 @@ from rest_framework.test import APIClient, APITestCase, APITransactionTestCase
 
 from notifications.models import EmailLog
 from rewards.models import LoyaltyLedger
-from services.models import AirtimeTransaction, DataTransaction
-from services.serializers import normalize_ng_phone
+from services.models import AirtimeTransaction, Beneficiary, DataTransaction
+from services.serializers import BeneficiarySerializer, normalize_ng_phone
 from services.vtpass import (
     generate_request_id,
     get_balance,
@@ -222,6 +222,7 @@ class AirtimePurchaseTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Insufficient funds.")
+        self.assertEqual(response.data["code"], "insufficient_funds")
         self.assertFalse(AirtimeTransaction.objects.filter(client_reference="AIR-NOFUNDS-001").exists())
         self.assertEqual(self.wallet.balance, Decimal("5000.00"))
         self.assertEqual(mock_purchase_airtime.call_count, 0)
@@ -277,7 +278,9 @@ DATA_DELIVERED = {
 
 def _variations_response(prices, key="variations"):
     """Shape returned by services.vtpass.get_service_variations."""
-    plans = [{"variation_code": code, "variation_amount": amount} for code, amount in prices.items()]
+    plans = [
+        {"variation_code": code, "name": f"Plan {code}", "variation_amount": amount} for code, amount in prices.items()
+    ]
     return {"ok": True, "code": "000", "content": {key: plans}, "http_status": 200}
 
 
@@ -315,6 +318,7 @@ class DataPurchaseTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["price"], "1200.00")
+        self.assertEqual(response.data["code"], "price_changed")
         self.assertFalse(DataTransaction.objects.filter(client_reference="DATA-CHEAP-001").exists())
         self.assertEqual(self.wallet.balance, Decimal("3000.00"))
         self.assertEqual(mock_purchase_data.call_count, 0)
@@ -339,6 +343,12 @@ class DataPurchaseTests(APITestCase):
         self.assertEqual(txn.amount, Decimal("1200.00"))
         self.assertEqual(self.wallet.balance, Decimal("1800.00"))
         self.assertEqual(_ledger_types("data:DATA-NOAMT-001"), ["hold", "capture"])
+        # The plan's name is kept, so receipts and history read "Data Plan mtn-1gb", not just the code.
+        self.assertEqual(response.data["plan_name"], "Plan mtn-1gb")
+        receipt = self.client.get(reverse("purchase-receipt", args=["DATA-NOAMT-001"]))
+        history = self.client.get(reverse("wallet-history"), {"kind": "purchase"})
+        self.assertEqual(receipt.data["item"], "Data Plan mtn-1gb")
+        self.assertEqual(history.data["results"][0]["description"], "Data Plan mtn-1gb for 08031234567 (MTN)")
 
     @patch("services.views.purchase_data", return_value=DATA_DELIVERED)
     def test_data_purchase_reads_misspelled_varations_key(self, _mock_purchase_data):
@@ -549,6 +559,27 @@ class RewardAndReceiptSignalTests(APITransactionTestCase):
         self.assertEqual(loyalty_entries.first().points, 10)
         self.assertEqual(receipt_logs.count(), 1)
 
+    def test_a_reversed_purchase_loses_its_points_once(self):
+        delivered = {
+            "provider": {"code": "000", "requestId": "VT-SIG-2", "content": {"transactions": {"status": "delivered"}}}
+        }
+        reversed_body = {"provider": {"code": "040", "content": {"transactions": {"status": "reversed"}}}}
+        with patch("services.views.purchase_airtime", return_value=delivered):
+            self.client.post(
+                self.url,
+                {"amount": "1000.00", "network": "mtn", "phone": "08031234567", "client_reference": "AIR-SIG-002"},
+                format="json",
+            )
+        txn = AirtimeTransaction.objects.get(client_reference="AIR-SIG-002")
+        callback = {"type": "transaction-update", "data": {"requestId": txn.provider_request_id}}
+
+        with patch("services.views.requery_status", return_value=reversed_body):
+            self.client.post(reverse("vtpass-callback"), callback, format="json")
+            self.client.post(reverse("vtpass-callback"), callback, format="json")
+
+        points = list(LoyaltyLedger.objects.filter(user=self.user).order_by("id").values_list("txn_type", "points"))
+        self.assertEqual(points, [("airtime", 10), ("reversal", -10)])
+
 
 # ===================== VTpass client (https://www.vtpass.com/documentation/) =====================
 class VTpassClientTests(SimpleTestCase):
@@ -730,6 +761,7 @@ class VTpassPurchaseTests(APITestCase):
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
         self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Daily purchase limit", second.data["error"])
+        self.assertEqual(second.data["code"], "daily_limit")
         self.assertEqual(self._wallet(), (Decimal("700.00"), Decimal("0.00")))
 
     @override_settings(AIRTIME_MIN_AMOUNT=50, AIRTIME_MAX_AMOUNT=500)
@@ -1030,3 +1062,84 @@ class ConcurrentPurchaseTests(APITransactionTestCase):
         self.assertEqual(sorted(codes), [201, 201, 400, 400, 400, 400])
         self.assertEqual((wallet.balance, wallet.locked), (Decimal("200.00"), Decimal("0.00")))
         call_command("check_wallets", stdout=io.StringIO())
+
+
+class ReceiptAndSavedNumberTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="saved@example.com", password="StrongPass123")
+        self.client.force_authenticate(self.user)
+
+    def test_receipt_for_own_purchase_only(self):
+        DataTransaction.objects.create(
+            user=self.user,
+            network="mtn",
+            phone="08031234567",
+            plan="mtn-1gb",
+            amount=Decimal("500.00"),
+            status="successful",
+            client_reference="RC-1",
+            provider_request_id="202610231200ABC",
+        )
+        other = User.objects.create_user(email="other@example.com", password="StrongPass123")
+
+        mine = self.client.get(reverse("purchase-receipt", args=["RC-1"]))
+        self.client.force_authenticate(other)
+        theirs = self.client.get(reverse("purchase-receipt", args=["RC-1"]))
+
+        self.assertEqual(mine.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            {k: mine.data[k] for k in ("item", "amount", "status", "vtpass_request_id")},
+            {
+                "item": "Data mtn-1gb",
+                "amount": "500.00",
+                "status": "successful",
+                "vtpass_request_id": "202610231200ABC",
+            },
+        )
+        self.assertEqual(theirs.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_save_list_and_delete_numbers(self):
+        url = reverse("beneficiaries")
+
+        created = self.client.post(url, {"name": "Mum", "phone": "+2348031234567", "network": "MTN"}, format="json")
+        duplicate = self.client.post(url, {"name": "Mother", "phone": "08031234567", "network": "mtn"}, format="json")
+        bad_network = self.client.post(
+            url, {"name": "Dad", "phone": "08051234567", "network": "visafone"}, format="json"
+        )
+
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual((created.data["phone"], created.data["network"]), ("08031234567", "mtn"))
+        self.assertEqual(duplicate.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(bad_network.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual([b["name"] for b in self.client.get(url).data], ["Mum"])
+
+        other = User.objects.create_user(email="other@example.com", password="StrongPass123")
+        self.client.force_authenticate(other)
+        detail = reverse("beneficiary-detail", args=[created.data["id"]])
+        self.assertEqual(self.client.get(url).data, [])
+        self.assertEqual(self.client.delete(detail).status_code, status.HTTP_404_NOT_FOUND)
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.delete(detail).status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Beneficiary.objects.exists())
+
+    def test_saved_numbers_are_capped(self):
+        Beneficiary.objects.bulk_create(
+            Beneficiary(user=self.user, name=f"N{i}", phone=f"0803{i:07d}", network="mtn")
+            for i in range(BeneficiarySerializer.MAX_PER_USER)
+        )
+
+        response = self.client.post(
+            reverse("beneficiaries"), {"name": "One more", "phone": "08051234567", "network": "glo"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_detect_network_from_the_prefix(self):
+        url = reverse("detect-network")
+
+        self.assertEqual(
+            self.client.get(url, {"phone": "+2348051234567"}).data, {"phone": "08051234567", "network": "glo"}
+        )
+        self.assertEqual(self.client.get(url, {"phone": "07011234567"}).data["network"], "airtel")
+        self.assertIsNone(self.client.get(url, {"phone": "07991234567"}).data["network"])
+        self.assertEqual(self.client.get(url, {"phone": "123"}).status_code, status.HTTP_400_BAD_REQUEST)

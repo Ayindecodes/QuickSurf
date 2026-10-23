@@ -48,7 +48,7 @@ def _receipt_text(user, txn, label: str) -> str:
     lines = [
         f"Hi {first},",
         "",
-        "Payment received.",
+        "Your purchase was successful.",
         "",
         f"Service: {label}",
         f"Network: {getattr(txn, 'network', '')}",
@@ -123,31 +123,41 @@ def _data_presave(sender, instance: DataTransaction, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Post-save: trigger on transition to success (AFTER COMMIT)
+# Post-save: act on status transitions (AFTER COMMIT)
 # ---------------------------------------------------------------------------
 
 
-@receiver(post_save, sender=AirtimeTransaction)
-def on_airtime_success(sender, instance: AirtimeTransaction, created, **kwargs):
-    new_ok = str(instance.status).lower() in SUCCESS_VALUES
-    old_ok = str(getattr(instance, "_old_status", "")).lower() in SUCCESS_VALUES
-    if new_ok and not old_ok:
+def _take_back_points(user, txn_type: str, txn_id) -> None:
+    """A reversed purchase loses the points it earned (once)."""
+    earned = LoyaltyLedger.objects.filter(user=user, txn_type=txn_type, txn_id=str(txn_id), points__gt=0).first()
+    if earned is None:
+        return
+    LoyaltyLedger.objects.get_or_create(
+        user=user,
+        txn_type="reversal",
+        txn_id=f"{txn_type}:{txn_id}",
+        defaults={"points": -earned.points, "reason": "Purchase reversed"},
+    )
+
+
+def _on_status_change(instance, txn_type: str, label: str) -> None:
+    new, old = str(instance.status).lower(), str(getattr(instance, "_old_status", "")).lower()
+    if new in SUCCESS_VALUES and old not in SUCCESS_VALUES:
 
         def _after_commit():
-            _award_points_once(instance.user, instance.amount, "Airtime purchase", "airtime", instance.id)
-            _send_receipt_safe(instance.user, instance, "Airtime", "Receipt - Airtime Purchase")
+            _award_points_once(instance.user, instance.amount, f"{label} purchase", txn_type, instance.id)
+            _send_receipt_safe(instance.user, instance, label, f"Receipt - {label} Purchase")
 
         transaction.on_commit(_after_commit)
+    elif new == "reversed" and old != "reversed":
+        transaction.on_commit(lambda: _take_back_points(instance.user, txn_type, instance.id))
+
+
+@receiver(post_save, sender=AirtimeTransaction)
+def on_airtime_saved(sender, instance: AirtimeTransaction, created, **kwargs):
+    _on_status_change(instance, "airtime", "Airtime")
 
 
 @receiver(post_save, sender=DataTransaction)
-def on_data_success(sender, instance: DataTransaction, created, **kwargs):
-    new_ok = str(instance.status).lower() in SUCCESS_VALUES
-    old_ok = str(getattr(instance, "_old_status", "")).lower() in SUCCESS_VALUES
-    if new_ok and not old_ok:
-
-        def _after_commit():
-            _award_points_once(instance.user, instance.amount, "Data purchase", "data", instance.id)
-            _send_receipt_safe(instance.user, instance, "Data", "Receipt - Data Purchase")
-
-        transaction.on_commit(_after_commit)
+def on_data_saved(sender, instance: DataTransaction, created, **kwargs):
+    _on_status_change(instance, "data", "Data")

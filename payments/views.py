@@ -84,7 +84,7 @@ class PaymentInitView(APIView):
     def post(self, request):
         if not settings.TOPUPS_ENABLED:
             return Response(
-                {"detail": "Top-ups are temporarily unavailable. Please try again later."},
+                {"detail": "Top-ups are temporarily unavailable. Please try again later.", "code": "topups_paused"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         if not request.user.email_verified:

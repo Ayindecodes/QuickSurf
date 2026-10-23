@@ -156,3 +156,37 @@ def end_all_sessions(user) -> None:
     """Revoke every refresh token the user holds. Access tokens expire on their own (JWT_ACCESS_MINUTES)."""
     for token in OutstandingToken.objects.filter(user=user):
         BlacklistedToken.objects.get_or_create(token=token)
+
+
+# ---------- Closing an account ----------
+class AccountNotEmpty(Exception):
+    pass
+
+
+def close_account(user) -> None:
+    """
+    Close an account at the user's request: personal details are removed and sign-in disabled. Purchases,
+    payments and the wallet ledger stay, anonymised, as financial records. Refused while the wallet holds
+    money or a purchase is pending, because there is no way to pay it out.
+    """
+    from services.models import AirtimeTransaction, Beneficiary, DataTransaction
+    from wallets.models import Wallet
+
+    with transaction.atomic():
+        wallet = Wallet.objects.select_for_update().get(user=user)
+        if wallet.balance or wallet.locked:
+            raise AccountNotEmpty(f"Your wallet still holds ₦{wallet.balance + wallet.locked}. Spend it first.")
+        for model in (AirtimeTransaction, DataTransaction):
+            if model.objects.filter(user=user, status__in=["initiated", "pending"]).exists():
+                raise AccountNotEmpty("A purchase is still pending. Try again once it has finished.")
+
+        user.email = f"closed-{user.pk}@closed.invalid"
+        user.first_name = user.last_name = user.phone = ""
+        user.email_verified_at = None
+        user.is_active = False
+        user.set_unusable_password()
+        user.save()
+        TransactionPin.objects.filter(user=user).delete()
+        OneTimeCode.objects.filter(user=user).delete()
+        Beneficiary.objects.filter(user=user).delete()
+    end_all_sessions(user)

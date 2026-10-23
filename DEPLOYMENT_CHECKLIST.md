@@ -30,6 +30,7 @@ Then run `python manage.py check --deploy`.
   - `daily_report` (daily)
   - `purge_old_logs --apply` (weekly)
   - `verify_pending_topups`
+  - `send_queued_emails` (every 2 min: receipts wait for it)
   - `vtpass_balance --warn-below 10000`
   - `check_wallets`
 - **Callbacks:**

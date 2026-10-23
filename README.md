@@ -4,7 +4,9 @@ Backend for buying Nigerian airtime and mobile data. Users top up a naira wallet
 **Paystack** and spend it on MTN, Glo, Airtel and 9mobile airtime or data, delivered by
 **VTpass**. Django 5.2 + Django REST Framework, PostgreSQL, Redis.
 
-API docs (when running): `/api/docs/` (Swagger) and `/api/redoc/`.
+API docs (when running): `/api/docs/` (Swagger) and `/api/redoc/`. The frontend guide is
+[docs/API.md](docs/API.md). Use the `/api/v1/` paths: the unversioned `/api/` copies are kept for the
+old frontend.
 
 ## Run it locally
 
@@ -78,6 +80,9 @@ that touches balances. In short:
   `/api/users/logout/` revokes one, or all with `everywhere: true`.
 - **Transaction PIN:** purchases need a 4-digit `pin`, set with `/api/users/pin/` (which needs the
   account password). Five wrong PINs lock purchases for 30 minutes.
+- **Profile:** `/api/v1/users/me/` reads and updates names and phone, and `DELETE` with the password
+  closes the account. Closing is refused while the wallet holds money; otherwise personal details are
+  removed and the financial records kept.
 - **Limits:** per-IP limits on login, sign-up and reset, and per email on login. Per user on purchases
   and top-ups. A lower daily cap applies to accounts under a day old.
 - **Staff:**
@@ -96,7 +101,8 @@ that touches balances. In short:
 | `payments/` | Paystack init, verify, webhook (`views.py`), shared logic (`services.py`), `verify_pending_topups` |
 | `services/` | Airtime/data purchases (`views.py`), VTpass client (`vtpass.py`), settlement, data plans, VTpass callback, `vtpass_balance` |
 | `core/` | Throttling, `requery_pending`, `audit_money` |
-| `rewards/`, `notifications/` | Loyalty points and receipt emails on successful purchases |
+| `rewards/` | Loyalty points: earned on successful purchases, taken back on reversals, redeemed into the wallet (`services.py`) |
+| `notifications/` | Emails: codes are sent at once, receipts are queued for `send_queued_emails` |
 
 ## Operations
 
@@ -106,6 +112,7 @@ Run these on a schedule (Render cron jobs):
 |---|---|---|
 | `python manage.py ops_alerts` | every 15 min | Emails `OPS_ALERT_EMAILS` about stuck purchases, failure spikes, top-ups in review, low VTpass balance, ledger mismatches, rejected webhooks |
 | `python manage.py requery_pending` | every 5 min | Settles purchases still pending with VTpass; logs ones stuck for over 30 min |
+| `python manage.py send_queued_emails` | every 2 min | Sends queued receipt emails; retries a failed send up to 3 times |
 | `python manage.py verify_pending_topups` | every 10 min | Credits paid Paystack top-ups that were never verified; abandons stale ones |
 | `python manage.py vtpass_balance --warn-below 10000` | hourly | Fails (and logs an error) when our VTpass wallet runs low |
 | `python manage.py check_wallets` | daily | Fails if any wallet doesn't equal the sum of its ledger |
@@ -119,6 +126,9 @@ One-off tools:
 
 - `python manage.py audit_money [--csv]` is a read-only report of past money problems.
 - `python manage.py clear_stale_locked [--apply]` removes locked money left by the old code.
+
+Rewards: 1 point per ₦100 spent (`POINTS_PER_NAIRA`), worth `REWARD_POINT_VALUE` naira each, redeemable from
+`REWARDS_MIN_REDEMPTION` points. Redemptions are wallet credits on the ledger (type `reward`).
 
 Kill switches: set `PURCHASES_ENABLED=False` or `TOPUPS_ENABLED=False` to stop new sales or top-ups
 without a code change. Payments already made are still credited.
