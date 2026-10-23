@@ -106,6 +106,7 @@ INSTALLED_APPS = [
 # Middleware
 # -------------------------------------------------------------------
 MIDDLEWARE = [
+    "core.request_id.RequestIdMiddleware",  # first, so every log line in the request carries the ID
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -434,14 +435,20 @@ DATA_PRICE_MARKUP_PERCENT = config("DATA_PRICE_MARKUP_PERCENT", default="0", cas
 # Logging
 # -------------------------------------------------------------------
 LOG_LEVEL = "DEBUG" if DEBUG else "INFO"
+# json: one JSON object per line (production default, for log search); text: readable lines.
+LOG_FORMAT = config("LOG_FORMAT", default="json" if IS_PRODUCTION else "text")
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "request_id": {"()": "core.request_id.RequestIdFilter"},
+    },
     "formatters": {
-        "app": {"format": "[{levelname}] {asctime} {name} - {message}", "style": "{"},
+        "text": {"format": "[{levelname}] {asctime} {name} [{request_id}] - {message}", "style": "{"},
+        "json": {"()": "core.request_id.JsonFormatter"},
     },
     "handlers": {
-        "console": {"class": "logging.StreamHandler", "formatter": "app"},
+        "console": {"class": "logging.StreamHandler", "formatter": LOG_FORMAT, "filters": ["request_id"]},
     },
     "root": {"handlers": ["console"], "level": LOG_LEVEL},
     "loggers": {
@@ -449,6 +456,27 @@ LOGGING = {
         "django.request": {"level": "WARNING"},
     },
 }
+
+# -------------------------------------------------------------------
+# Monitoring
+# -------------------------------------------------------------------
+# Who gets ops alerts and the daily report (comma-separated emails). Empty: logged only.
+OPS_ALERT_EMAILS = config("OPS_ALERT_EMAILS", cast=Csv(), default="")
+
+# Error tracking: set SENTRY_DSN to send errors (and ERROR log lines) to Sentry. Request bodies
+# are never sent, so PINs, passwords and codes stay on the server.
+SENTRY_DSN = config("SENTRY_DSN", default="")
+if SENTRY_DSN:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=ENV,
+        release=config("RENDER_GIT_COMMIT", default="") or None,
+        send_default_pii=False,
+        max_request_body_size="never",
+        traces_sample_rate=config("SENTRY_TRACES_SAMPLE_RATE", default=0.0, cast=float),
+    )
 
 # >>> NEW: print a clear boot line so you can verify LIVE mode in Render logs
 logger = logging.getLogger(__name__)

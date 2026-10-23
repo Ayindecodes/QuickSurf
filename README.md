@@ -104,11 +104,16 @@ Run these on a schedule (Render cron jobs):
 
 | Command | How often | What it does |
 |---|---|---|
+| `python manage.py ops_alerts` | every 15 min | Emails `OPS_ALERT_EMAILS` about stuck purchases, failure spikes, top-ups in review, low VTpass balance, ledger mismatches, rejected webhooks |
 | `python manage.py requery_pending` | every 5 min | Settles purchases still pending with VTpass; logs ones stuck for over 30 min |
 | `python manage.py verify_pending_topups` | every 10 min | Credits paid Paystack top-ups that were never verified; abandons stale ones |
 | `python manage.py vtpass_balance --warn-below 10000` | hourly | Fails (and logs an error) when our VTpass wallet runs low |
 | `python manage.py check_wallets` | daily | Fails if any wallet doesn't equal the sum of its ledger |
+| `python manage.py daily_report` | daily | Yesterday's money totals and a Paystack reconciliation, emailed to `OPS_ALERT_EMAILS` |
 | `python manage.py purge_old_logs --apply` | weekly | Deletes logs older than 180 days and expired token records |
+
+When something goes wrong, see the [runbooks](docs/runbooks/README.md). Every response has an `X-Request-ID`
+header, and errors return it as `request_id`: search the logs for it.
 
 One-off tools:
 

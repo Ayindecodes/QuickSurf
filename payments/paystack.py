@@ -52,3 +52,28 @@ def valid_webhook(signature_header: str, raw_body: bytes) -> bool:
         return False
     digest = hmac.new(WEBHOOK_SECRET.encode(), raw_body, hashlib.sha512).hexdigest()
     return hmac.compare_digest(digest, signature_header)
+
+
+def list_successful(start, end) -> list:
+    """Every successful Paystack transaction between start and end (datetimes), across all pages."""
+    found, page = [], 1
+    while True:
+        r = requests.get(
+            f"{BASE}/transaction",
+            headers=_auth_headers(),
+            params={
+                "status": "success",
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+                "perPage": 100,
+                "page": page,
+            },
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        body = r.json()
+        batch = body.get("data") or []
+        found.extend(batch)
+        if not batch or page >= int((body.get("meta") or {}).get("pageCount") or 1):
+            return found
+        page += 1

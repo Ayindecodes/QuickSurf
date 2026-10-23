@@ -37,6 +37,9 @@ class PaymentIntentAdmin(admin.ModelAdmin):
             body = trim_payload(body)
             log_paystack(intent.user, intent.reference, "/transaction/verify", {"source": "admin"}, body, code)
             status_text, credited = apply_verification(intent, code, body)
+            self.log_change(
+                request, intent, f"Re-verified with Paystack: {status_text}{' (credited)' if credited else ''}"
+            )
             results.append(f"{intent.reference}: {status_text}{' (credited)' if credited else ''}")
         if results:
             self.message_user(request, "; ".join(results), level=messages.INFO)

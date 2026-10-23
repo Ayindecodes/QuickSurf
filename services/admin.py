@@ -52,7 +52,6 @@ class AirtimeTransactionAdmin(admin.ModelAdmin):
         "provider_request_id",
         "provider_status",
         "user__email",
-        "user__username",
         "phone",
     )
     list_filter = ("network", "status", "timestamp")
@@ -96,7 +95,9 @@ class AirtimeTransactionAdmin(admin.ModelAdmin):
                     settled = settle_purchase(
                         tx, outcome, provider_status=body.get("response_description") or tx.provider_status
                     )
-                    updated += settled.status != tx.status
+                    if settled.status != tx.status:
+                        updated += 1
+                        self.log_change(request, settled, f"Re-queried VTpass: {tx.status} -> {settled.status}")
             except Exception as e:  # pragma: no cover
                 self.message_user(request, f"Error on {tx.client_reference}: {e}", level=messages.ERROR)
         self.message_user(request, f"Requery complete. Updated {updated} transaction(s).", level=messages.INFO)
@@ -125,7 +126,6 @@ class DataTransactionAdmin(admin.ModelAdmin):
         "provider_request_id",
         "provider_status",
         "user__email",
-        "user__username",
         "phone",
         "plan",
     )
@@ -171,7 +171,9 @@ class DataTransactionAdmin(admin.ModelAdmin):
                     settled = settle_purchase(
                         tx, outcome, provider_status=body.get("response_description") or tx.provider_status
                     )
-                    updated += settled.status != tx.status
+                    if settled.status != tx.status:
+                        updated += 1
+                        self.log_change(request, settled, f"Re-queried VTpass: {tx.status} -> {settled.status}")
             except Exception as e:  # pragma: no cover
                 self.message_user(request, f"Error on {tx.client_reference}: {e}", level=messages.ERROR)
         self.message_user(request, f"Requery complete. Updated {updated} transaction(s).", level=messages.INFO)
