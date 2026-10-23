@@ -1,44 +1,42 @@
 # services/views.py
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 import logging
 import uuid
+from datetime import timedelta
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Dict
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q, Sum
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from django.core.cache import cache
-from django.utils import timezone
-from datetime import timedelta
-
-from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.response import Response
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
-from rest_framework import serializers as drf_serializers
-
-from drf_spectacular.utils import extend_schema, inline_serializer
-from drf_spectacular.types import OpenApiTypes
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.privacy import mask_pii
 from core.throttling import PurchaseRateThrottle, SafeAnonRateThrottle, SafeUserRateThrottle
 from users.security import PinError, check_pin
 from wallets import services as wallet_services
 from wallets.models import Wallet
-from .models import AirtimeTransaction, DataTransaction, ProviderLog
-from .settlement import FINAL_STATUSES, ledger_reference, purchase_kind, settle_purchase
-from .serializers import (
-    AirtimeTransactionSerializer,
-    DataTransactionSerializer,
-    AirtimePurchaseRequestSerializer,
-    DataPurchaseRequestSerializer,
-)
 
+from .models import AirtimeTransaction, DataTransaction, ProviderLog
+from .serializers import (
+    AirtimePurchaseRequestSerializer,
+    AirtimeTransactionSerializer,
+    DataPurchaseRequestSerializer,
+    DataTransactionSerializer,
+)
+from .settlement import FINAL_STATUSES, ledger_reference, purchase_kind, settle_purchase
 from .vtpass import (
     DATA_SERVICE_IDS,
     extract_variations,
@@ -48,8 +46,9 @@ from .vtpass import (
     strict_map_outcome,
     transaction_id,
 )
+
 try:
-    from .vtpass import requery_status, get_service_variations
+    from .vtpass import get_service_variations, requery_status
 except ImportError:
     requery_status = None
     get_service_variations = None

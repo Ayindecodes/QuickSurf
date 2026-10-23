@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from decimal import Decimal
 import re
+from decimal import Decimal
 from typing import Set
 
 from django.conf import settings
 from rest_framework import serializers
 
 from .models import (
-    AirtimeTransaction,
-    DataTransaction,
     NETWORK_CHOICES,
     STATUS_CHOICES,
+    AirtimeTransaction,
+    DataTransaction,
 )
 
 # ---------------------------------------------------------------------------

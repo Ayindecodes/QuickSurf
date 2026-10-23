@@ -1,7 +1,10 @@
 # payments/serializers.py
 from decimal import Decimal
+
 from rest_framework import serializers
+
 from .models import PaymentIntent
+
 
 class PaymentInitRequestSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2)

@@ -1,0 +1,5 @@
+# Development and CI tools, on top of the app's requirements.
+-r requirements.txt
+coverage==7.17.0
+pip-audit==2.10.1
+ruff==0.17.2

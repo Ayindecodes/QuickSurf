@@ -5,15 +5,16 @@ from django.conf import settings
 from django.contrib import admin
 from django.core.cache import cache
 from django.db import connection
-from django.urls import path, include
 from django.http import JsonResponse
+from django.urls import include, path
+
+# DRF Spectacular (API docs)
+from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
 # JWT Auth (custom obtain that logs IP/UA/device)
 from rest_framework_simplejwt.views import TokenRefreshView
-from users.views import LoggingTokenObtainPairView
 
-# DRF Spectacular (API docs)
-from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
+from users.views import LoggingTokenObtainPairView
 
 
 def health_view(_request):

@@ -1,5 +1,6 @@
 from django.db import models
 
+
 class EmailLog(models.Model):
     to = models.EmailField()
     subject = models.CharField(max_length=200)

@@ -1,19 +1,19 @@
 # wallets/views.py
-from rest_framework.views import APIView
-from rest_framework.permissions import BasePermission, IsAuthenticated
-from rest_framework.response import Response
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
+from services.models import AirtimeTransaction, DataTransaction
 
 from . import services as wallet_services
 from .models import Wallet
-from services.models import AirtimeTransaction, DataTransaction
 from .serializers import (
-    WalletBalanceSerializer,
-    TransactionSerializer,
     AdjustmentSerializer,
+    TransactionSerializer,
+    WalletBalanceSerializer,
 )
 
 

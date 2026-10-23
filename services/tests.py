@@ -1,6 +1,7 @@
 import importlib
 import io
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -15,10 +16,10 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase, APITransactionTestCase
 
+from notifications.models import EmailLog
+from rewards.models import LoyaltyLedger
 from services.models import AirtimeTransaction, DataTransaction
 from services.vtpass import generate_request_id, get_balance, purchase_airtime, purchase_data, strict_map_outcome
-from rewards.models import LoyaltyLedger
-from notifications.models import EmailLog
 from users.models import User
 from wallets import services as wallet_services
 from wallets.models import Transaction, Wallet
