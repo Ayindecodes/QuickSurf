@@ -76,7 +76,7 @@ pip install -r requirements-dev.txt   # ruff and coverage, if you work outside D
 | Change | Update |
 |---|---|
 | New setting | `.env.production.example`, `DEPLOYMENT.md` |
-| New cron job | `DEPLOYMENT.md`, `README.md`, `docs/runbooks/README.md` |
+| New scheduled job | `deploy/crontab`, `DEPLOYMENT.md`, `README.md` |
 | API change | `docs/API.md` |
 | Something on-call needs to know | a runbook |
 | A significant design choice | a new ADR in `docs/adr/` |

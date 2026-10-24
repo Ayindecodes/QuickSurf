@@ -1,0 +1,11 @@
+# Scheduled jobs, run by supercronic in the "scheduler" container. Times are UTC (Lagos is UTC+1).
+# supercronic never starts a job while the previous run of it is still going.
+
+*/2  * * * *  python manage.py send_queued_emails
+*/5  * * * *  python manage.py requery_pending
+*/10 * * * *  python manage.py verify_pending_topups
+*/15 * * * *  python manage.py ops_alerts
+0    * * * *  python manage.py vtpass_balance --warn-below 10000
+30   4 * * *  python manage.py check_wallets
+0    5 * * *  python manage.py daily_report
+0    3 * * 0  python manage.py purge_old_logs --apply

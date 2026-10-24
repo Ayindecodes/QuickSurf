@@ -12,11 +12,13 @@ records in [`docs/adr/`](adr/) explain the choices, and the [runbooks](runbooks/
                                    │      │                               Redis (locks, rate limits, cache)
                                    │      ├──▶ Paystack  (top-ups: initialize, verify; webhooks in)
                                    │      └──▶ VTpass    (airtime/data: pay, requery, plans; callbacks in)
-                                   └── Render cron jobs (settling, alerts, reports, email queue)
+                                   └── Scheduled jobs (settling, alerts, reports, email queue)
 ```
 
 - **The frontend** calls the API from the browser. It holds no secrets: tokens live in browser storage,
   protected by a strict Content-Security-Policy (see the frontend README).
+- **Hosting:** the API runs either self-hosted on one server (`deploy/`: Caddy, Docker Compose, supercronic
+  for the scheduled jobs, nightly encrypted backups) or on Render. See [DEPLOYMENT.md](../DEPLOYMENT.md).
 - **The API** is the only thing that touches money, providers or the database. It runs on gunicorn with
   threads, because purchases spend most of their time waiting on VTpass.
 - **PostgreSQL** is required, not just preferred. Row locks (`select_for_update`) keep wallets correct
@@ -84,7 +86,7 @@ The load test sends the same order five times at once to check this ([load-testi
 - Auth uses JWTs. Refresh tokens rotate and are blacklisted after use. Staff use the Django admin with
   enforced TOTP.
 
-## Background jobs (Render cron)
+## Scheduled jobs (`deploy/crontab`, or Render cron)
 
 | Job | Why it exists |
 |---|---|

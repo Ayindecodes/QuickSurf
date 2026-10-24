@@ -16,7 +16,8 @@ old frontend.
 | [docs/adr/](docs/adr/) | Why: the wallet ledger, the versioned API, unclear provider outcomes |
 | [docs/API.md](docs/API.md) | The API for frontend developers |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to make a change safely (money, migrations, security) |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying and configuring production |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Deploying and configuring production (Render or your own server) |
+| [deploy/README.md](deploy/README.md) | Self-hosting on a VPS: setup, deploys, backups, restore |
 | [docs/LAUNCH.md](docs/LAUNCH.md) | The go-live checklist and soft-launch plan |
 | [docs/runbooks/](docs/runbooks/README.md) | What to do when something goes wrong |
 | [docs/load-testing.md](docs/load-testing.md) | Load test results and how to rerun them |
@@ -119,7 +120,7 @@ that touches balances. In short:
 
 ## Operations
 
-Run these on a schedule (Render cron jobs):
+Run these on a schedule. Self-hosted, `deploy/crontab` already does it; on Render, add them as cron jobs:
 
 | Command | How often | What it does |
 |---|---|---|

@@ -8,3 +8,9 @@ __pycache__
 db.sqlite3
 staticfiles
 media
+deploy/.env
+deploy/*.env
+*.dump
+*.dump.age
+node_modules
+.github
