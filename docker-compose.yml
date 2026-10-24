@@ -20,6 +20,7 @@ services:
 
   web:
     build: .
+    user: root  # the code is mounted from your machine, so commands like makemigrations can write to it
     command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
     env_file: .env
     environment:

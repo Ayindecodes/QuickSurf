@@ -12,8 +12,11 @@ TOPUPS_ENABLED=False
 
 ## 2. Roll back the code
 
-- **Backend:**
-  1. In Render, open the web service, then **Events**, pick the last good deploy and choose **Rollback**.
+- **Backend, self-hosted:** run `deploy/deploy.sh rollback`. It switches the API and scheduler back to the
+  previous release's image within seconds. `deploy/deploy.sh rollback <tag>` picks a specific one; the
+  tags are listed in `deploy/.deploy-history`.
+- **Backend, on Render:**
+  1. Open the web service, then **Events**, pick the last good deploy and choose **Rollback**.
   2. Do the same for the cron jobs: they deploy from the same repo. Alternatively, suspend them until
      you're done.
   3. Turn off auto-deploy until the fix is merged, or the next merge will deploy again.

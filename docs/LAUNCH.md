@@ -35,10 +35,20 @@ Tick each item off in the PR or a copy of this file.
 
 ### Infrastructure (You set up, Dev checks)
 Everything here follows [DEPLOYMENT.md](../DEPLOYMENT.md).
-- [ ] Render PostgreSQL on a paid plan with backups.
-- [ ] Render Redis.
-- [ ] An Environment Group with every variable.
-- [ ] The cron jobs.
+- [ ] **If self-hosting** ([deploy/README.md](../deploy/README.md)):
+  - a written agreement with the server's owner about access to data and money;
+  - `server-setup.sh` run, and SSH key logins only;
+  - DNS for the API pointing at the server;
+  - `deploy/.env` filled in;
+  - the backup key made on your own computer;
+  - off-server backup storage and `BACKUP_PING_URL` set;
+  - a first `deploy/deploy.sh deploy`;
+  - the recorded client IP checked: it must be your real IP.
+- [ ] **If on Render:**
+  - PostgreSQL on a paid plan with backups;
+  - Redis;
+  - an Environment Group with every variable;
+  - the cron jobs.
 - [ ] SMTP works: `python manage.py sendtestemail you@example.com`.
 - [ ] Paystack webhook URL and VTpass callback URL are set in their dashboards.
 - [ ] Vercel: `NEXT_PUBLIC_API_BASE` (and the Sentry DSN, if you want one) for production.
@@ -77,7 +87,8 @@ Pick a quiet hour, for example 6–8 am. Allow about two hours.
 1. **Stop sales on the current site** (this works on today's code):
    `PURCHASES_ENABLED=False`, `TOPUPS_ENABLED=False`.
 2. **Back up:** take a manual database backup and record its name. This is the rollback point.
-3. **Prepare Render:**
+3. **Prepare the server.** (Self-hosted: nothing deploys until you run `deploy/deploy.sh`, so skip the
+   auto-deploy step.) On Render:
    - turn **auto-deploy off**;
    - make sure every new environment variable is set. The new code refuses to start without them;
    - set the soft-launch limits below.
@@ -85,8 +96,11 @@ Pick a quiet hour, for example 6–8 am. Allow about two hours.
    - #3, then #4, … then #10;
    - after each merge, retarget the next PR to `main` if GitHub hasn't done it already;
    - wait for CI on each.
-5. **Deploy once:** use **Manual Deploy → latest commit** on the web service and the cron jobs. The
-   build runs the migrations.
+5. **Deploy once:**
+   - self-hosted: `deploy/deploy.sh deploy`;
+   - Render: **Manual Deploy → latest commit** on the web service and the cron jobs.
+
+   Either way, the migrations run as part of the deploy.
 6. **Check, with sales still off** (DEPLOYMENT.md, "After every deploy"):
    - health;
    - `BOOT … PROVIDER_MODE=LIVE` in the logs;

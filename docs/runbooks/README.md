@@ -27,7 +27,7 @@ What to do when something goes wrong. Alerts and the daily report link to the pa
   when it isn't `200`.
 - **Errors:** set `SENTRY_DSN` to send errors and `ERROR` log lines to Sentry. Request bodies are never sent.
 - **Alerts:** set `OPS_ALERT_EMAILS` (comma-separated). It needs working SMTP settings.
-- **Scheduled jobs:** see the cron table in [DEPLOYMENT.md](../../DEPLOYMENT.md#render-backend).
+- **Scheduled jobs:** self-hosted, they're in [deploy/crontab](../../deploy/crontab) and run automatically; on Render, see the cron table in [DEPLOYMENT.md](../../DEPLOYMENT.md#render-backend-if-not-self-hosting).
 
 ## Where to look
 

@@ -37,7 +37,7 @@ def health_view(_request):
         {
             "status": "ok" if healthy else "error",
             "app": "Quicksurf",
-            "version": os.environ.get("RENDER_GIT_COMMIT", "dev")[:12],
+            "version": (os.environ.get("APP_VERSION") or os.environ.get("RENDER_GIT_COMMIT") or "dev")[:12],
             "checks": checks,
         },
         status=200 if healthy else 503,

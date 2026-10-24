@@ -336,6 +336,9 @@ CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
 # Security (good defaults for HTTPS)
 # -------------------------------------------------------------------
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+# The header the proxy in front of us sets to the real client IP (core/net.py): CF-Connecting-IP behind
+# Cloudflare (Render), X-Real-IP behind our own Caddy (deploy/). Empty: use the connection's address.
+CLIENT_IP_HEADER = config("CLIENT_IP_HEADER", default="CF-Connecting-IP").strip()
 SECURE_SSL_REDIRECT = env_bool("SECURE_SSL_REDIRECT", default=IS_PRODUCTION)
 
 SESSION_COOKIE_SECURE = IS_PRODUCTION
@@ -478,7 +481,7 @@ if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         environment=ENV,
-        release=config("RENDER_GIT_COMMIT", default="") or None,
+        release=config("APP_VERSION", default="") or config("RENDER_GIT_COMMIT", default="") or None,
         send_default_pii=False,
         max_request_body_size="never",
         traces_sample_rate=config("SENTRY_TRACES_SAMPLE_RATE", default=0.0, cast=float),
