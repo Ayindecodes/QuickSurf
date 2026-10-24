@@ -11,6 +11,9 @@
 #                                         restore a backup into a throwaway database and check it
 #   deploy/deploy.sh restore <file.dump.age> <age-identity-file>
 #                                         REPLACE the production database with a backup (disaster recovery)
+#   deploy/deploy.sh import-database <postgres-url>
+#                                         REPLACE this database with a copy of another one (moving from
+#                                         Render) and upgrade it to this version
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -112,7 +115,7 @@ print(\"newest ledger entry:\", Transaction.objects.aggregate(t=Max(\"timestamp\
     [ -f "$file" ] && [ -f "$identity" ] || die "Can't read $file or $identity."
     echo "This REPLACES the production database with $file."
     echo "Everything recorded after that backup is lost (docs/runbooks/backups.md). Type RESTORE to continue:"
-    read -r answer
+    read -r answer || true
     [ "$answer" = RESTORE ] || die "Cancelled."
     compose stop api scheduler backup
     compose exec -T db psql -q -U quicksurf -d postgres \
@@ -124,5 +127,30 @@ print(\"newest ledger entry:\", Transaction.objects.aggregate(t=Max(\"timestamp\
     compose exec api python manage.py check_wallets
     echo "Restored. Reconcile Paystack and VTpass activity since the backup before turning sales back on."
     ;;
-  *) sed -n '2,17p' "$0"; exit 1 ;;
+  import-database)
+    source_url="${2:?usage: import-database <postgres-url of the database to copy, e.g. the External Database URL from Render>}"
+    source_host="${source_url#*@}"
+    source_host="${source_host%%/*}"
+    network="$(compose ps -q db | xargs docker inspect --format '{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}')"
+    copier=(docker run --rm --network "$network" quicksurf-backup:latest) # no -i: it must not read the IMPORT answer
+    version=$("${copier[@]}" psql "$source_url" -tAc "SHOW server_version_num") || die "Can't connect to $source_host."
+    [ "${version:0:2}" -le 16 ] || die "The source runs Postgres ${version:0:2}; this server runs 16. Ask the developer to match the versions."
+    echo "This REPLACES this server's database with a copy of the database at $source_host,"
+    echo "then upgrades it to this version. Stop sales on the old server first (docs/LAUNCH.md). Type IMPORT to continue:"
+    read -r answer || true
+    [ "$answer" = IMPORT ] || die "Cancelled."
+    compose stop api scheduler backup
+    compose exec -T db psql -q -U quicksurf -d postgres \
+      -c "DROP DATABASE IF EXISTS quicksurf WITH (FORCE);" -c "CREATE DATABASE quicksurf OWNER quicksurf;"
+    "${copier[@]}" pg_dump --format=custom --no-owner --no-acl --dbname="$source_url" |
+      compose exec -T db pg_restore --no-owner --no-acl --exit-on-error -U quicksurf --dbname=quicksurf
+    echo "Copied. Upgrading it to this version:"
+    compose run --rm --no-deps api python manage.py migrate --noinput
+    compose start api scheduler backup
+    wait_healthy
+    compose exec api python manage.py check_wallets
+    echo "Imported. Past money problems found in the copied data (keep this report):"
+    compose exec api python manage.py audit_money
+    ;;
+  *) sed -n '2,20p' "$0"; exit 1 ;;
 esac

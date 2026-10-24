@@ -41,6 +41,23 @@ can't be read without it.
 - **Off-server storage for backups,** S3-compatible: Cloudflare R2, Backblaze B2, AWS S3…
 - **A fixed IP,** which a VPS has. Give it to VTpass if they ask you to whitelist IPs.
 
+### No domain yet?
+
+You can start without buying one:
+- **API address:** create a free name at [duckdns.org](https://www.duckdns.org) (sign in with Google or
+  GitHub), e.g. `quicksurf.duckdns.org`, and set its IP to the server's. Use it as `API_DOMAIN`; Caddy
+  gets a certificate for it like any other name. Customers never see it: they use the website on Vercel.
+- **Email:** use a Gmail account made for QuickSurf, with an
+  [app password](https://myaccount.google.com/apppasswords) (it needs 2-step verification):
+  `EMAIL_HOST=smtp.gmail.com`, `EMAIL_PORT=587`, the address as `EMAIL_HOST_USER` and
+  `DEFAULT_FROM_EMAIL`, and the 16-character app password as `EMAIL_HOST_PASSWORD`. Gmail allows about
+  500 emails a day.
+
+**Moving to your own domain later** needs no code or data changes:
+1. Change `API_DOMAIN`, `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`, then run `deploy/deploy.sh restart`.
+2. Update the Paystack webhook and VTpass callback URLs.
+3. Update `NEXT_PUBLIC_API_BASE` in Vercel.
+
 ## First-time setup
 
 1. **Prepare the server.** As root, once:
@@ -101,6 +118,19 @@ can't be read without it.
      (see [DEPLOYMENT.md](../DEPLOYMENT.md#provider-dashboards)).
    - Set the frontend's `NEXT_PUBLIC_API_BASE` to `https://<API_DOMAIN>` in Vercel.
    - Point an uptime monitor at `https://<API_DOMAIN>/api/health/`.
+
+## Moving the live site here from Render
+
+Customers, passwords, wallets, purchases and payments are copied from Render's database and upgraded to
+this version in one command:
+
+```bash
+deploy/deploy.sh import-database '<External Database URL from Render>'
+```
+
+It then checks every wallet against its ledger and prints a money audit. Follow the launch-day order in
+[docs/LAUNCH.md](../docs/LAUNCH.md#2-launch-day-moving-from-render-to-the-self-hosted-server). **Render's
+auto-deploy must be off before anything is merged into `main`.**
 
 ## Day to day
 
