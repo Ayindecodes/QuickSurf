@@ -1,0 +1,25 @@
+# HTTPS in front of the API. Caddy gets and renews the Let's Encrypt certificate for API_DOMAIN by itself.
+{
+	email {$ACME_EMAIL}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy api:8000 {
+		# The real client IP for rate limits and logs (core/net.py, CLIENT_IP_HEADER=X-Real-IP). Caddy
+		# overwrites whatever the client sent, so it can't be faked.
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options nosniff
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

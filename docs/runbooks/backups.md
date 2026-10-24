@@ -5,6 +5,10 @@ and write down the results.
 
 ## What protects the data
 
+- **Self-hosted** ([deploy/README.md](../../deploy/README.md#backups)):
+  - a nightly encrypted dump, kept 14 days on the server and copied off it;
+  - `deploy/deploy.sh restore-check` runs the drill below in one command;
+  - `deploy/deploy.sh restore` is the real restore.
 - **Render PostgreSQL backups:** use a paid plan. Check in the dashboard how long backups are kept and
   whether point-in-time recovery is included. Free databases expire and have no backups.
 - **An independent weekly dump** that doesn't depend on Render. Run it from a trusted machine with the

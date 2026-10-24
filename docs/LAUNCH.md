@@ -35,10 +35,20 @@ Tick each item off in the PR or a copy of this file.
 
 ### Infrastructure (You set up, Dev checks)
 Everything here follows [DEPLOYMENT.md](../DEPLOYMENT.md).
-- [ ] Render PostgreSQL on a paid plan with backups.
-- [ ] Render Redis.
-- [ ] An Environment Group with every variable.
-- [ ] The cron jobs.
+- [ ] **If self-hosting** ([deploy/README.md](../deploy/README.md)):
+  - a written agreement with the server's owner about access to data and money;
+  - `server-setup.sh` run, and SSH key logins only;
+  - DNS for the API pointing at the server;
+  - `deploy/.env` filled in;
+  - the backup key made on your own computer;
+  - off-server backup storage and `BACKUP_PING_URL` set;
+  - a first `deploy/deploy.sh deploy`;
+  - the recorded client IP checked: it must be your real IP.
+- [ ] **If on Render:**
+  - PostgreSQL on a paid plan with backups;
+  - Redis;
+  - an Environment Group with every variable;
+  - the cron jobs.
 - [ ] SMTP works: `python manage.py sendtestemail you@example.com`.
 - [ ] Paystack webhook URL and VTpass callback URL are set in their dashboards.
 - [ ] Vercel: `NEXT_PUBLIC_API_BASE` (and the Sentry DSN, if you want one) for production.
@@ -70,40 +80,90 @@ Everything here follows [DEPLOYMENT.md](../DEPLOYMENT.md).
 - [ ] Sentry DSNs are set (optional).
 - [ ] Vercel Analytics is on.
 
-## 2. Launch day
+## 2. Launch day: moving from Render to the self-hosted server
 
-Pick a quiet hour, for example 6–8 am. Allow about two hours.
+Today's live site runs the old code on Render. On launch day, its customers and their money are copied to
+the new server, which then takes over. Pick a quiet hour, for example 6–8 am, and allow about two hours.
 
-1. **Stop sales on the current site** (this works on today's code):
-   `PURCHASES_ENABLED=False`, `TOPUPS_ENABLED=False`.
-2. **Back up:** take a manual database backup and record its name. This is the rollback point.
-3. **Prepare Render:**
-   - turn **auto-deploy off**;
-   - make sure every new environment variable is set. The new code refuses to start without them;
-   - set the soft-launch limits below.
-4. **Merge the backend PRs in order:**
-   - #3, then #4, … then #10;
-   - after each merge, retarget the next PR to `main` if GitHub hasn't done it already;
-   - wait for CI on each.
-5. **Deploy once:** use **Manual Deploy → latest commit** on the web service and the cron jobs. The
-   build runs the migrations.
-6. **Check, with sales still off** (DEPLOYMENT.md, "After every deploy"):
-   - health;
-   - `BOOT … PROVIDER_MODE=LIVE` in the logs;
-   - `check_wallets`;
-   - `vtpass_balance`.
-7. **Merge frontend PR #1.** Vercel deploys it. Open the site and log in.
-8. **Turn sales on:** `PURCHASES_ENABLED=True`, `TOPUPS_ENABLED=True`.
+### The day before
+- [ ] The new server is set up and was tested in **test mode** (`ENV=staging`, VTpass sandbox, Paystack
+  test keys) with the new frontend pointed at it.
+- [ ] `deploy/.env` is switched to the **live** settings:
+  - `ENV=production`, `PROVIDER_MODE=LIVE`, live keys, soft-launch limits;
+  - **`PURCHASES_ENABLED=False` and `TOPUPS_ENABLED=False`**.
+
+  Then run `deploy/deploy.sh restart`. It must report healthy.
+- [ ] **On Render, turn auto-deploy off.** This one is critical: Render rebuilds whenever `main` changes,
+  and its build command runs migrations, which would upgrade the **live** database under the old code.
+  Go to the web service and every cron job, then Settings → Build & Deploy → Auto-Deploy: **No**. Do this
+  before merging anything.
+- [ ] Check the Render database can be copied:
+  - its page shows the **PostgreSQL version**. It must be 16 or lower; if it's 17, tell the developer
+    first;
+  - under **Access Control**, the new server's IP must be allowed to connect.
+- [ ] The frontend's business details and legal review are done (`npm run launch-check` passes).
+
+### On the day
+1. **Stop sales on Render:** set `PURCHASES_ENABLED=False` and `TOPUPS_ENABLED=False` in its environment.
+   Payments already made are still credited.
+2. **Wait about 15 minutes** so purchases in progress settle. Anything still pending is copied over and
+   settled by the new server.
+3. **Merge the backend PRs** into `main`, in order: #3, #4, … #12. Retarget each next PR to `main` if
+   GitHub doesn't. Render won't deploy, because auto-deploy is off.
+4. **Release `main` on the new server:** `deploy/deploy.sh deploy`.
+5. **Copy the live data across.**
+   1. In Render, open the database → **Connections** → copy the **External Database URL**.
+   2. On the new server, run the command below and type `IMPORT` when asked:
+
+      ```bash
+      deploy/deploy.sh import-database '<External Database URL>'
+      ```
+
+   It copies everything (customers, passwords, wallets, purchases, payments, points) and upgrades it to
+   the new version. Opening ledger entries are created from the old balances. It then checks every wallet
+   against its ledger and prints the money audit. **Save that report:** it lists past problems to settle
+   with customers.
+6. **Point the providers at the new server:**
+   - Paystack webhook → `https://<API_DOMAIN>/api/payments/webhook/`;
+   - VTpass callback → `https://<API_DOMAIN>/api/services/vtpass/callback/`;
+   - if VTpass whitelists IPs, add the server's IP.
+7. **Switch the website:**
+   1. In Vercel, set `NEXT_PUBLIC_API_BASE=https://<API_DOMAIN>`.
+   2. Merge frontend PR #2 into #1, then #1 into `main`. Vercel deploys it.
+   3. Open the site and log in with an existing account. The balance must match Render's.
+8. **Turn sales on, on the new server:** set `PURCHASES_ENABLED=True` and `TOPUPS_ENABLED=True` in
+   `deploy/.env`, then run `deploy/deploy.sh restart`.
 9. **Do a live test from a staff account:**
    - top up ₦200 with a real card;
    - buy ₦50 of airtime to your own number;
-   - check the receipt, the history and the email receipt;
-   - run `check_wallets`.
-10. **Turn auto-deploy back on.** Watch the logs and alerts for an hour, then announce the launch to
+   - check the receipt, the history and the email;
+   - run `deploy/deploy.sh manage check_wallets`.
+10. **Retire Render:** suspend the web service and the cron jobs. Keep the database for two weeks as an
+    extra copy, then delete it.
+11. **Take the first backup now** (`deploy/deploy.sh backup-now`) and check it reached your bucket. Watch
+    the logs (`deploy/deploy.sh logs api`) and the alert emails for an hour, then announce the launch to
     the soft-launch group.
 
-If anything in steps 5–9 goes wrong, see [runbooks/rollback.md](runbooks/rollback.md): kill switches
-first, then fix forward.
+### If it goes wrong
+- **Before step 8** (sales are still off everywhere):
+  1. Point Vercel and the provider URLs back at Render.
+  2. Turn Render's sales back on.
+  3. Investigate.
+
+  Nothing new has happened on the new server, so nothing is lost.
+- **After step 8:** don't go back to Render, whose data is now out of date. Turn the kill switches on
+  and fix forward ([runbooks/rollback.md](runbooks/rollback.md)).
+
+### If you stay on Render instead
+Same idea, without the copy:
+1. Turn auto-deploy off and back up the database.
+2. Set every new environment variable and the soft-launch limits, with the kill switches off.
+3. Merge #3–#12.
+4. Use **Manual Deploy → latest commit** on the web service and the cron jobs. The build runs the
+   migrations.
+5. Run the same checks.
+6. Merge the frontend.
+7. Turn sales on and do the same live test.
 
 ## 3. Soft launch (first 1–2 weeks)
 
