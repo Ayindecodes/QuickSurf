@@ -277,6 +277,7 @@ REST_FRAMEWORK = {
         "verify_email": "10/hour",
         "pin_change": "10/hour",
         "password_change": "10/hour",
+        "phone_verify": "5/hour",  # each one sends an SMS, which costs money
         "redeem": "10/hour",
         "purchase": config("PURCHASE_RATE", default="30/hour"),  # per user
         "topup": config("TOPUP_RATE", default="20/hour"),  # per user
@@ -429,6 +430,27 @@ TOPUPS_ENABLED = env_bool("TOPUPS_ENABLED", default=True)
 AIRTIME_MIN_AMOUNT = config("AIRTIME_MIN_AMOUNT", default=50, cast=int)
 AIRTIME_MAX_AMOUNT = config("AIRTIME_MAX_AMOUNT", default=50000, cast=int)
 TOPUP_MAX_AMOUNT = config("TOPUP_MAX_AMOUNT", default=500000, cast=int)  # per top-up; 0 = no limit
+DAILY_TOPUP_LIMIT = config("DAILY_TOPUP_LIMIT", default=500000, cast=int)  # per user per day; 0 = none
+
+# Verification levels (users/limits.py). "basic" = email confirmed; "verified" = phone confirmed by SMS.
+# Basic accounts (and flagged ones) get these daily limits instead of the ones above.
+BASIC_DAILY_PURCHASE_LIMIT = config("BASIC_DAILY_PURCHASE_LIMIT", default=10000, cast=int)
+BASIC_DAILY_TOPUP_LIMIT = config("BASIC_DAILY_TOPUP_LIMIT", default=10000, cast=int)
+# Require a verified phone before the first top-up. Turn on once SMS works (SMS_BACKEND=termii).
+TOPUP_REQUIRES_PHONE = env_bool("TOPUP_REQUIRES_PHONE", default=False)
+# Fraud checks (users/risk.py): flag an account when the card that paid has funded more than
+# CARD_MAX_ACCOUNTS accounts, or its device signed in to more than DEVICE_MAX_ACCOUNTS in 30 days.
+CARD_MAX_ACCOUNTS = config("CARD_MAX_ACCOUNTS", default=2, cast=int)
+DEVICE_MAX_ACCOUNTS = config("DEVICE_MAX_ACCOUNTS", default=3, cast=int)
+
+# Text messages (notifications/sms.py): "termii" in production, "console" for local development.
+SMS_BACKEND = config("SMS_BACKEND", default="console").strip().lower()
+TERMII_API_KEY = config("TERMII_API_KEY", default="")
+TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="")
+TERMII_BASE_URL = config("TERMII_BASE_URL", default="https://api.ng.termii.com").rstrip("/")
+TERMII_CHANNEL = config("TERMII_CHANNEL", default="dnd")  # "dnd" reaches numbers on Do-Not-Disturb
+if IS_PRODUCTION and TOPUP_REQUIRES_PHONE and SMS_BACKEND != "termii":
+    raise ImproperlyConfigured("TOPUP_REQUIRES_PHONE needs SMS_BACKEND=termii, or nobody could top up.")
 DAILY_PURCHASE_LIMIT = config("DAILY_PURCHASE_LIMIT", default=200000, cast=int)
 # Accounts less than a day old get a lower daily limit (0 = same as everyone).
 NEW_ACCOUNT_DAILY_LIMIT = config("NEW_ACCOUNT_DAILY_LIMIT", default=20000, cast=int)

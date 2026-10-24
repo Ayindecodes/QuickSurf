@@ -4,10 +4,15 @@ Paystack payment handling shared by the verify endpoint, the webhook, the admin 
 verify_pending_topups command. Wallet money itself only moves through wallets.services.
 """
 
+import hashlib
+import hmac
+
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
 from services.models import ProviderLog
+from users.risk import check_payer
 from wallets import services as wallet_services
 
 from .models import PaymentIntent
@@ -58,7 +63,26 @@ def log_paystack(user, reference, endpoint, request_payload, response, status_co
         pass
 
 
-def credit_wallet_once(user, amount, reference: str) -> bool:
+def payer_fingerprint(data) -> str:
+    """
+    What identifies the payer in Paystack's charge data: the card's authorization signature, or for
+    bank transfers a keyed hash of the sending account. Never a card or account number.
+    """
+    authorization = (data or {}).get("authorization") if isinstance(data, dict) else None
+    if not isinstance(authorization, dict):
+        return ""
+    signature = str(authorization.get("signature") or "").strip()
+    if signature:
+        return signature[:64]
+    account = str(authorization.get("sender_bank_account_number") or "").strip()
+    bank = str(authorization.get("sender_bank") or "").strip()
+    if account:
+        digest = hmac.new(settings.SECRET_KEY.encode(), f"{bank}|{account}".encode(), hashlib.sha256).hexdigest()
+        return f"acct:{digest[:40]}"
+    return ""
+
+
+def credit_wallet_once(user, amount, reference: str, payer: str = "") -> bool:
     """Credit a paid intent to its wallet and mark it success. Returns False if it was already final."""
     with transaction.atomic():
         intent = PaymentIntent.objects.select_for_update().get(reference=reference, user=user)
@@ -67,7 +91,12 @@ def credit_wallet_once(user, amount, reference: str) -> bool:
 
         # The ledger's unique (topup, reference) entry is the hard guarantee against crediting twice.
         credited = wallet_services.credit_topup(user, amount, reference)
+        if payer:
+            intent.payer_fingerprint = payer
+            intent.save(update_fields=["payer_fingerprint", "updated"])
         intent.mark_success(when=timezone.now())
+    if credited:
+        check_payer(user, payer)
     return credited
 
 
@@ -108,7 +137,7 @@ def apply_verification(intent, code, body):
         if not payment_matches(intent, data):
             set_status_unless_final(intent, "review")
             return "review", False
-        return "success", credit_wallet_once(intent.user, intent.amount, intent.reference)
+        return "success", credit_wallet_once(intent.user, intent.amount, intent.reference, payer_fingerprint(data))
 
     if paystack_status in ("failed", "abandoned"):
         set_status_unless_final(intent, paystack_status)

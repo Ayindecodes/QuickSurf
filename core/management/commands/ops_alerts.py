@@ -14,6 +14,7 @@ from core.alerts import BAD_WEBHOOK_SIGNATURES, event_count, notify_ops
 from payments.models import PaymentIntent
 from services.models import AirtimeTransaction, DataTransaction
 from services.vtpass import get_balance
+from users.models import User
 
 logger = logging.getLogger(__name__)
 PURCHASES = (AirtimeTransaction, DataTransaction)
@@ -42,6 +43,7 @@ class Command(BaseCommand):
             None if opts["skip_balance"] else self._vtpass_balance(opts["balance_below"]),
             self._ledger_mismatches(),
             self._bad_webhook_signatures(),
+            self._flagged_accounts(),
         ]
         problems = [problem for problem in checks if problem]
         if not problems:
@@ -86,6 +88,18 @@ class Command(BaseCommand):
             "failure_spike",
             f"{len(failed)} of {total} purchases failed in the last hour (most common VTpass code: {code}, "
             f"{times}x). See docs/runbooks/vtpass-outage.md.",
+        )
+
+    def _flagged_accounts(self):
+        flagged = User.objects.filter(flagged_at__isnull=False).order_by("-flagged_at")
+        count = flagged.count()
+        if not count:
+            return None
+        newest = flagged.first()
+        return (
+            "flagged_accounts",
+            f"{count} account(s) flagged by the fraud checks are waiting for review, newest {newest.email}: "
+            f"{newest.flag_reason}. Admin → Users → filter by Flagged; clear the flag once checked.",
         )
 
     def _topups_in_review(self):

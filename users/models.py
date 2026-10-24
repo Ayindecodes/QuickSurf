@@ -36,15 +36,34 @@ class User(AbstractUser):
     # Set when the user enters a code we emailed them. Needed before topping up.
     email_verified_at = models.DateTimeField(null=True, blank=True)
     phone = models.CharField(max_length=15, blank=True)  # the user's own number, normalised (0803...)
+    # Set when the user enters a code we texted to `phone`. A verified number belongs to one account only.
+    phone_verified_at = models.DateTimeField(null=True, blank=True)
+    # Set by the fraud checks (users/risk.py), e.g. one card funding many accounts. A flagged account
+    # keeps the basic limits until staff clear the flag in the admin.
+    flagged_at = models.DateTimeField(null=True, blank=True)
+    flag_reason = models.CharField(max_length=200, blank=True)
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
 
     objects = UserManager()
 
+    class Meta(AbstractUser.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=["phone"],
+                condition=models.Q(phone_verified_at__isnull=False),
+                name="users_verified_phone_unique",
+            )
+        ]
+
     @property
     def email_verified(self) -> bool:
         return self.email_verified_at is not None
+
+    @property
+    def phone_verified(self) -> bool:
+        return self.phone_verified_at is not None
 
 
 class TransactionPin(models.Model):
@@ -64,13 +83,15 @@ class TransactionPin(models.Model):
 
 
 class OneTimeCode(models.Model):
-    """A short-lived 6-digit code emailed to a user. Only a keyed hash of the code is stored."""
+    """A short-lived 6-digit code emailed or texted to a user. Only a keyed hash of the code is stored."""
 
     PURPOSE_VERIFY_EMAIL = "verify_email"
     PURPOSE_RESET_PASSWORD = "reset_password"
+    PURPOSE_VERIFY_PHONE = "verify_phone"
     PURPOSES = [
         (PURPOSE_VERIFY_EMAIL, "Verify email"),
         (PURPOSE_RESET_PASSWORD, "Reset password"),
+        (PURPOSE_VERIFY_PHONE, "Verify phone"),
     ]
     MAX_ATTEMPTS = 5
 
@@ -79,6 +100,8 @@ class OneTimeCode(models.Model):
     code_hash = models.CharField(max_length=64)
     expires_at = models.DateTimeField()
     attempts = models.PositiveSmallIntegerField(default=0)
+    # What the code was sent to, when it confirms something specific (the phone number being verified)
+    target = models.CharField(max_length=32, blank=True)
     used_at = models.DateTimeField(null=True, blank=True)  # also set when a newer code replaces it
     created_at = models.DateTimeField(auto_now_add=True)
 
