@@ -629,6 +629,12 @@ class ApiVersionTests(APITestCase):
         self.assertEqual(anonymous["error"]["code"], "not_authenticated")
         self.assertNotIn("fields", anonymous["error"])
 
+    def test_a_form_field_named_code_is_a_field_error_not_the_error_code(self):
+        envelope = error_envelope({"code": ["Invalid or expired code."]}, 400)
+
+        self.assertEqual(envelope["error"]["code"], "invalid")
+        self.assertEqual(envelope["error"]["fields"], {"code": ["Invalid or expired code."]})
+
     def test_extra_values_stay_next_to_the_message(self):
         envelope = error_envelope({"error": "Price changed.", "code": "price_changed", "price": "500.00"}, 409)
 
