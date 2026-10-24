@@ -36,6 +36,10 @@ class PaymentIntent(models.Model):
     class Meta:
         ordering = ("-created",)
 
+    # Identifies the card (Paystack's authorization signature) or bank account that paid, so one card
+    # funding many accounts can be spotted (users/risk.py). Never a card or account number.
+    payer_fingerprint = models.CharField(max_length=64, blank=True, db_index=True)
+
     def mark_success(self, when=None):
         self.status = "success"
         if when and not self.paid_at:

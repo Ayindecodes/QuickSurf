@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from allauth.mfa.models import Authenticator
 from django.conf import settings
+from django.contrib import admin
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group
 from django.core import mail
@@ -32,6 +33,7 @@ from notifications.utils import send_email
 from payments.models import PaymentIntent
 from services.models import AirtimeTransaction, DataTransaction, ProviderLog
 from users.models import TransactionPin, User
+from users.risk import flag
 from wallets import services as wallet_services
 from wallets.models import Transaction, Wallet
 
@@ -627,6 +629,12 @@ class ApiVersionTests(APITestCase):
         self.assertEqual(anonymous["error"]["code"], "not_authenticated")
         self.assertNotIn("fields", anonymous["error"])
 
+    def test_a_form_field_named_code_is_a_field_error_not_the_error_code(self):
+        envelope = error_envelope({"code": ["Invalid or expired code."]}, 400)
+
+        self.assertEqual(envelope["error"]["code"], "invalid")
+        self.assertEqual(envelope["error"]["fields"], {"code": ["Invalid or expired code."]})
+
     def test_extra_values_stay_next_to_the_message(self):
         envelope = error_envelope({"error": "Price changed.", "code": "price_changed", "price": "500.00"}, 409)
 
@@ -661,3 +669,42 @@ class LoadTestUsersTests(TestCase):
             with self.settings(**overrides), self.assertRaises(CommandError):
                 call_command("loadtest_users", "--count", "1", "--output", "/tmp/never-written.json")
         self.assertFalse(User.objects.filter(email__startswith="loadtest+").exists())
+
+
+class FlaggedAccountTests(TestCase):
+    def test_ops_alerts_report_flags_and_staff_can_clear_them(self):
+        user = User.objects.create_user(email="flagged@example.com", password="Pass-Phrase-9")
+        flag(user, "The card or bank account that paid has funded 3 accounts")
+
+        with patch("core.management.commands.ops_alerts.get_balance", return_value=Decimal("50000")):
+            with self.assertRaises(CommandError) as raised:
+                call_command("ops_alerts", stdout=io.StringIO())
+        self.assertIn("flagged by the fraud checks", str(raised.exception))
+
+        staff = User.objects.create_superuser(email="boss@example.com", password="Pass-Phrase-9")
+        request = RequestFactory().post("/")
+        request.user = staff
+        model_admin = admin.site._registry[User]
+        with patch.object(model_admin, "message_user"):
+            model_admin.clear_flag(request, User.objects.filter(pk=user.pk))
+
+        user.refresh_from_db()
+        self.assertIsNone(user.flagged_at)
+        self.assertTrue(
+            LogEntry.objects.filter(object_id=str(user.pk), change_message__startswith="Cleared fraud flag").exists()
+        )
+
+
+@override_settings(CORS_ALLOWED_ORIGINS=["https://app.example.com"], CORS_ALLOW_ALL_ORIGINS=False)
+class CorsTests(TestCase):
+    def test_the_app_may_send_its_device_id_and_read_the_request_id(self):
+        preflight = self.client.options(
+            "/api/v1/users/login/",
+            HTTP_ORIGIN="https://app.example.com",
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD="POST",
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS="content-type,x-device-id",
+        )
+        response = self.client.get("/api/v1/health/", HTTP_ORIGIN="https://app.example.com")
+
+        self.assertIn("x-device-id", preflight["Access-Control-Allow-Headers"].lower())
+        self.assertIn("x-request-id", response["Access-Control-Expose-Headers"].lower())

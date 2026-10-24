@@ -8,7 +8,7 @@ from typing import Any, Dict
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Q, Sum
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.decorators import method_decorator
@@ -25,6 +25,7 @@ from rest_framework.views import APIView
 from core.privacy import mask_pii
 from core.request_id import current_request_id
 from core.throttling import PurchaseRateThrottle, SafeAnonRateThrottle, SafeUserRateThrottle
+from users import limits as user_limits
 from users.security import PinError, check_pin
 from wallets import services as wallet_services
 from wallets.models import Wallet
@@ -242,33 +243,24 @@ def _data_plan(network: str, variation_code: str) -> tuple[Decimal, str] | None:
 
 
 # ---------- Limits & references ----------
-def _daily_limit(user) -> int:
-    """The user's daily purchase limit in naira (0 = none). Accounts under a day old get NEW_ACCOUNT_DAILY_LIMIT."""
-    limits = [settings.DAILY_PURCHASE_LIMIT]
-    if user.date_joined > timezone.now() - timedelta(days=1):
-        limits.append(settings.NEW_ACCOUNT_DAILY_LIMIT)
-    limits = [limit for limit in limits if limit]
-    return min(limits) if limits else 0
-
-
 def _daily_limit_exceeded(user, amount: Decimal) -> int:
-    """The limit this purchase would take the user's purchases today (Lagos time) past, or 0 if it doesn't."""
-    limit = _daily_limit(user)
+    """
+    The limit this purchase would take the user's purchases today (Lagos time) past, or 0 if it doesn't.
+    The limit depends on the verification level (users/limits.py).
+    """
+    limit = user_limits.daily_purchase_limit(user)
     if not limit:
         return 0
-    start_of_day = timezone.localtime().replace(hour=0, minute=0, second=0, microsecond=0)
-    spent = Decimal("0")
-    for model in (AirtimeTransaction, DataTransaction):
-        total = model.objects.filter(
-            user=user, status__in=["pending", "successful"], timestamp__gte=start_of_day
-        ).aggregate(total=Sum("amount"))["total"]
-        spent += total or 0
-    return limit if spent + amount > limit else 0
+    return limit if user_limits.spent_today(user) + amount > limit else 0
 
 
-def _daily_limit_response(limit: int):
+def _daily_limit_response(user, limit: int):
     return Response(
-        {"error": f"Daily purchase limit of ₦{limit:,} reached. Try again tomorrow.", "code": "daily_limit"},
+        {
+            "error": f"Daily purchase limit of ₦{limit:,} reached. Try again tomorrow.",
+            "code": "daily_limit",
+            "level": user_limits.level(user),
+        },
         status=status.HTTP_400_BAD_REQUEST,
     )
 
@@ -409,7 +401,7 @@ class AirtimePurchaseView(APIView):
 
                 exceeded_limit = _daily_limit_exceeded(user, amt)
                 if exceeded_limit:
-                    return _daily_limit_response(exceeded_limit)
+                    return _daily_limit_response(user, exceeded_limit)
                 try:
                     wallet_services.hold(user, amt, ledger_reference("airtime", client_ref))
                 except wallet_services.InsufficientFunds:
@@ -566,7 +558,7 @@ class DataPurchaseView(APIView):
 
                 exceeded_limit = _daily_limit_exceeded(user, amt)
                 if exceeded_limit:
-                    return _daily_limit_response(exceeded_limit)
+                    return _daily_limit_response(user, exceeded_limit)
                 try:
                     wallet_services.hold(user, amt, ledger_reference("data", client_ref))
                 except wallet_services.InsufficientFunds:

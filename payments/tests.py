@@ -23,7 +23,7 @@ from rest_framework.test import APIClient, APITestCase, APITransactionTestCase
 
 from payments.models import PaymentIntent
 from payments.paystack import initialize, kobo, list_successful, verify
-from payments.services import credit_wallet_once
+from payments.services import apply_verification, credit_wallet_once, payer_fingerprint
 from services.models import ProviderLog
 from users.models import User
 from wallets.models import Transaction, Wallet
@@ -486,3 +486,74 @@ class ConcurrentCreditTests(APITransactionTestCase):
         self.assertEqual(set(codes), {200})
         self.assertEqual(Wallet.objects.get(user=user).balance, Decimal("1500.00"))
         self.assertEqual(Transaction.objects.filter(type="topup", reference="PAY-RACE-2").count(), 1)
+
+
+INIT_OK = (200, {"status": True, "data": {"authorization_url": "https://checkout.paystack.com/x", "access_code": "x"}})
+
+
+class TopupGateTests(PaymentTestCase):
+    @override_settings(BASIC_DAILY_TOPUP_LIMIT=1000)
+    @patch("payments.views.ps_initialize", return_value=INIT_OK)
+    def test_basic_accounts_have_a_daily_top_up_limit(self, _mock_initialize):
+        first = self.client.post(reverse("payments_init"), {"amount": "800.00"}, format="json")
+        second = self.client.post(reverse("payments_init"), {"amount": "300.00"}, format="json")
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual((second.data["code"], second.data["remaining"]), ("daily_topup_limit", "200.00"))
+
+    @override_settings(TOPUP_REQUIRES_PHONE=True)
+    @patch("payments.views.ps_initialize", return_value=INIT_OK)
+    def test_top_ups_can_require_a_verified_phone(self, mock_initialize):
+        refused = self.client.post(reverse("payments_init"), {"amount": "500.00"}, format="json")
+        User.objects.filter(pk=self.user.pk).update(phone="08031234567", phone_verified_at=timezone.now())
+        self.user.refresh_from_db()
+        self.client.force_authenticate(self.user)
+        allowed = self.client.post(reverse("payments_init"), {"amount": "500.00"}, format="json")
+
+        self.assertEqual((refused.status_code, refused.data["code"]), (status.HTTP_403_FORBIDDEN, "phone_unverified"))
+        self.assertEqual(allowed.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(mock_initialize.call_count, 1)
+
+
+@override_settings(CARD_MAX_ACCOUNTS=2)
+class PayerFingerprintTests(PaymentTestCase):
+    def test_the_paying_card_is_recorded_but_its_details_are_not_stored(self):
+        intent = self._intent("PAY-CARD-1")
+        card = {"signature": "SIG_card_one", "last4": "4081", "bin": "408408", "authorization_code": "AUTH_x"}
+        with patch("payments.views.ps_verify", return_value=_verify_success("PAY-CARD-1", 150000, authorization=card)):
+            self.client.get(reverse("payments_verify", args=[intent.reference]))
+
+        intent.refresh_from_db()
+        self.assertEqual(intent.payer_fingerprint, "SIG_card_one")
+        self.assertNotIn("authorization", intent.verify_response["data"])
+        self.assertNotIn("4081", json.dumps(intent.verify_response))
+
+    def test_a_card_funding_too_many_accounts_flags_the_newest(self):
+        card = {"authorization": {"signature": "SIG_shared"}}
+        accounts = [self.user] + [
+            User.objects.create_user(
+                email=f"card{i}@example.com", password="StrongPass123", email_verified_at=timezone.now()
+            )
+            for i in range(2)
+        ]
+        for i, user in enumerate(accounts):
+            intent = PaymentIntent.objects.create(
+                user=user, amount=Decimal("100.00"), reference=f"PAY-SHARED-{i}", status="pending"
+            )
+            apply_verification(intent, 200, {"status": True, "data": _paid(intent.reference, 10000, **card)})
+
+        flagged = [User.objects.get(pk=user.pk).flag_reason for user in accounts]
+        self.assertEqual(flagged[:2], ["", ""])
+        self.assertIn("funded 3 accounts", flagged[2])
+        self.assertEqual(Wallet.objects.get(user=accounts[2]).balance, Decimal("100.00"))  # still credited: they paid
+
+    def test_bank_transfers_are_fingerprinted_without_keeping_the_account_number(self):
+        transfer = {"authorization": {"sender_bank": "Access", "sender_bank_account_number": "0123456789"}}
+
+        fingerprint = payer_fingerprint(transfer)
+
+        self.assertTrue(fingerprint.startswith("acct:"))
+        self.assertNotIn("0123456789", fingerprint)
+        self.assertEqual(fingerprint, payer_fingerprint(transfer))
+        self.assertEqual(payer_fingerprint({}), "")

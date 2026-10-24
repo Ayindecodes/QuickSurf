@@ -46,11 +46,15 @@ class Command(BaseCommand):
                 counts["error"] += 1
                 continue
 
-            body = trim_payload(body)
             log_paystack(
-                intent.user, intent.reference, "/transaction/verify", {"source": "verify_pending_topups"}, body, code
+                intent.user,
+                intent.reference,
+                "/transaction/verify",
+                {"source": "verify_pending_topups"},
+                trim_payload(body),
+                code,
             )
-            result, credited = apply_verification(intent, code, body)
+            result, credited = apply_verification(intent, code, body)  # the full data: it identifies the payer
             if result == "pending" and intent.created < abandon_before:
                 set_status_unless_final(intent, "abandoned")
                 result = "abandoned"

@@ -75,6 +75,8 @@ Every variable is listed in `.env.production.example`. The ones that matter most
 | `ADMIN_URL` | Unguessable. Staff must use an authenticator app (`STAFF_MFA_REQUIRED`) |
 | `OPS_ALERT_EMAILS`, `SENTRY_DSN` | Alerts and error tracking |
 | `PURCHASES_ENABLED`, `TOPUPS_ENABLED` | Kill switches |
+| `SMS_BACKEND=termii`, `TERMII_API_KEY`, `TERMII_SENDER_ID` | Phone verification texts. Then `TOPUP_REQUIRES_PHONE=True` once they arrive |
+| `BASIC_DAILY_PURCHASE_LIMIT`, `BASIC_DAILY_TOPUP_LIMIT`, `DAILY_TOPUP_LIMIT`, `CARD_MAX_ACCOUNTS`, `DEVICE_MAX_ACCOUNTS` | Verification levels and fraud checks (`docs/API.md`) |
 | Limits: `AIRTIME_MAX_AMOUNT`, `TOPUP_MAX_AMOUNT`, `DAILY_PURCHASE_LIMIT`, `NEW_ACCOUNT_DAILY_LIMIT`, `PURCHASE_RATE`, `TOPUP_RATE` | See the soft-launch values in LAUNCH.md |
 
 ### Provider dashboards
