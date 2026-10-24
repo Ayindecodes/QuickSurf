@@ -103,8 +103,13 @@ def check_pin(user, pin: str) -> None:
     raise error  # outside the atomic block, so the failed attempt is kept
 
 
-# ---------- Emailed one-time codes ----------
-def issue_code(user, purpose: str) -> str | None:
+# ---------- One-time codes (emailed or texted) ----------
+def _code_digest(user, purpose: str, target: str, code: str) -> str:
+    # A code for a phone number only confirms that number.
+    return _digest("code", user.pk, purpose, target, code) if target else _digest("code", user.pk, purpose, code)
+
+
+def issue_code(user, purpose: str, target: str = "") -> str | None:
     """A new 6-digit code (older ones stop working), or None if one was sent less than a minute ago."""
     now = timezone.now()
     if OneTimeCode.objects.filter(user=user, purpose=purpose, created_at__gt=now - CODE_RESEND_INTERVAL).exists():
@@ -112,13 +117,20 @@ def issue_code(user, purpose: str) -> str | None:
     OneTimeCode.objects.filter(user=user, purpose=purpose, used_at__isnull=True).update(used_at=now)
     code = f"{secrets.randbelow(1_000_000):06d}"
     OneTimeCode.objects.create(
-        user=user, purpose=purpose, code_hash=_digest("code", user.pk, purpose, code), expires_at=now + CODE_TTL
+        user=user,
+        purpose=purpose,
+        target=target,
+        code_hash=_code_digest(user, purpose, target, code),
+        expires_at=now + CODE_TTL,
     )
     return code
 
 
-def redeem_code(user, purpose: str, code: str) -> bool:
-    """True if code is the user's current unexpired code for purpose (it is then used up). Wrong tries count."""
+def redeem_code(user, purpose: str, code: str) -> OneTimeCode | None:
+    """
+    The user's current unexpired code for purpose if `code` matches it (it is then used up), else None.
+    Wrong tries count towards OneTimeCode.MAX_ATTEMPTS.
+    """
     now = timezone.now()
     with transaction.atomic():
         record = (
@@ -128,14 +140,14 @@ def redeem_code(user, purpose: str, code: str) -> bool:
             .first()
         )
         if record is None or record.attempts >= OneTimeCode.MAX_ATTEMPTS:
-            return False
-        if hmac.compare_digest(record.code_hash, _digest("code", user.pk, purpose, str(code or "").strip())):
+            return None
+        if hmac.compare_digest(record.code_hash, _code_digest(user, purpose, record.target, str(code or "").strip())):
             record.used_at = now
             record.save(update_fields=["used_at"])
-            return True
+            return record
         record.attempts += 1
         record.save(update_fields=["attempts"])
-        return False
+        return None
 
 
 def send_code(user, purpose: str, code: str) -> bool:
@@ -149,6 +161,35 @@ def send_code(user, purpose: str, code: str) -> bool:
         "If you didn't ask for it, you can ignore this email.\n\nQuickSurf"
     )
     return send_email(user.email, subject, body, log_body=body.replace(code, "******"))
+
+
+def send_phone_code(phone: str, code: str) -> bool:
+    from notifications.sms import send_sms
+
+    minutes = int(CODE_TTL.total_seconds() // 60)
+    return send_sms(
+        phone, f"Your QuickSurf code is {code}. It expires in {minutes} minutes. Never share it with anyone."
+    )
+
+
+class PhoneTaken(Exception):
+    """The number is already verified on another account."""
+
+
+def verify_phone(user, phone: str) -> None:
+    """Mark `phone` as the user's verified number. Raises PhoneTaken if another account has it."""
+    from django.db import IntegrityError
+
+    from users.models import User
+
+    if User.objects.filter(phone=phone, phone_verified_at__isnull=False).exclude(pk=user.pk).exists():
+        raise PhoneTaken
+    user.phone, user.phone_verified_at = phone, timezone.now()
+    try:
+        with transaction.atomic():
+            user.save(update_fields=["phone", "phone_verified_at"])
+    except IntegrityError as e:  # verified on another account at the same moment
+        raise PhoneTaken from e
 
 
 # ---------- Sessions ----------
@@ -182,7 +223,7 @@ def close_account(user) -> None:
 
         user.email = f"closed-{user.pk}@closed.invalid"
         user.first_name = user.last_name = user.phone = ""
-        user.email_verified_at = None
+        user.email_verified_at = user.phone_verified_at = None
         user.is_active = False
         user.set_unusable_password()
         user.save()

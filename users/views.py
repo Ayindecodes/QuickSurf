@@ -1,5 +1,6 @@
 # users/views.py
 import hashlib
+import logging
 
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
@@ -20,14 +21,18 @@ from core.net import client_ip
 from core.throttling import LoginEmailRateThrottle, SafeAnonRateThrottle, SafeScopedRateThrottle, SafeUserRateThrottle
 
 from .models import OneTimeCode, TransactionPin
+from .risk import check_device
 from .security import (
     AccountNotEmpty,
+    PhoneTaken,
     close_account,
     end_all_sessions,
     issue_code,
     redeem_code,
     send_code,
+    send_phone_code,
     set_pin,
+    verify_phone,
 )
 from .serializers import (
     ChangePasswordSerializer,
@@ -37,6 +42,7 @@ from .serializers import (
     LogoutSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
+    PhoneSerializer,
     PinSerializer,
     ProfileSerializer,
     TokenPairSchema,
@@ -44,11 +50,13 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 DEFAULT_THROTTLES = [SafeUserRateThrottle, SafeAnonRateThrottle]
 SCOPED_THROTTLES = [*DEFAULT_THROTTLES, SafeScopedRateThrottle]  # plus the view's throttle_scope
 VERIFY = OneTimeCode.PURPOSE_VERIFY_EMAIL
 RESET = OneTimeCode.PURPOSE_RESET_PASSWORD
+PHONE = OneTimeCode.PURPOSE_VERIFY_PHONE
 
 
 # ---------------------------
@@ -65,26 +73,31 @@ def _stored_email(email) -> str | None:
 
 
 def _device_fingerprint(request) -> str:
-    # Client may send a stable device id; else derive from UA+IP (bounded length)
-    explicit = request.headers.get("X-Device-Id")
+    """
+    "d:<id>" when the app sends its stable device ID (X-Device-Id); otherwise "h:<hash of browser and IP>",
+    which many people can share (mobile networks put whole areas behind one IP), so it only helps support.
+    """
+    explicit = request.headers.get("X-Device-Id", "").strip()
     if explicit:
-        return explicit[:128]
+        return f"d:{explicit[:120]}"
     ua = (request.META.get("HTTP_USER_AGENT") or "")[:1024]
     ip = client_ip(request) or ""
-    return hashlib.sha256(f"{ua}|{ip}".encode("utf-8")).hexdigest()[:32]
+    return "h:" + hashlib.sha256(f"{ua}|{ip}".encode("utf-8")).hexdigest()[:32]
 
 
 def _record_login_activity(user, request) -> None:
     try:
+        device = _device_fingerprint(request)
         LoginActivity.objects.create(
             user=user,
             ip=client_ip(request),
             user_agent=(request.META.get("HTTP_USER_AGENT") or "")[:1024],
-            device_fingerprint=_device_fingerprint(request),
+            device_fingerprint=device,
         )
+        check_device(user, device)
     except Exception:
         # Never block auth if logging fails
-        pass
+        logger.exception("Couldn't record a sign-in")
 
 
 def _tokens(user) -> dict:
@@ -278,6 +291,77 @@ class VerifyEmailConfirmView(APIView):
                 return Response(INVALID_CODE, status=status.HTTP_400_BAD_REQUEST)
             User.objects.filter(pk=user.pk).update(email_verified_at=timezone.now())
         return Response({"detail": "Email verified.", "email_verified": True})
+
+
+@extend_schema(
+    description="Text a 6-digit code to the user's phone number. Each number can be verified on one account only.",
+    request=PhoneSerializer,
+    responses={
+        200: OpenApiResponse(description="Sent"),
+        409: OpenApiResponse(description="phone_taken"),
+        429: OpenApiResponse(description="Too soon"),
+        503: OpenApiResponse(description="SMS failed"),
+    },
+)
+class PhoneRequestView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = SCOPED_THROTTLES
+    throttle_scope = "phone_verify"  # every SMS costs money
+
+    def post(self, request):
+        serializer = PhoneSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user, phone = request.user, serializer.validated_data["phone"]
+        if user.phone_verified and user.phone == phone:
+            return Response({"detail": "This number is already verified.", "phone": phone})
+        if User.objects.filter(phone=phone, phone_verified_at__isnull=False).exclude(pk=user.pk).exists():
+            return Response(
+                {"error": "This number is already verified on another QuickSurf account.", "code": "phone_taken"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        code = issue_code(user, PHONE, target=phone)
+        if code is None:
+            return Response(
+                {"detail": "A code was sent less than a minute ago. Please wait before asking again."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        if not send_phone_code(phone, code):
+            return Response(
+                {"detail": "We couldn't send the text. Please try again shortly.", "code": "sms_failed"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response({"detail": f"We texted a code to {phone}.", "phone": phone})
+
+
+@extend_schema(
+    description="Confirm the phone number with the 6-digit code that was texted to it.",
+    request=CodeSerializer,
+    responses={
+        200: ProfileSerializer,
+        400: OpenApiResponse(description="Bad code"),
+        409: OpenApiResponse(description="phone_taken"),
+    },
+)
+class PhoneConfirmView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = SCOPED_THROTTLES
+    throttle_scope = "verify_email"
+
+    def post(self, request):
+        serializer = CodeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        record = redeem_code(user, PHONE, serializer.validated_data["code"])
+        if record is None:
+            return Response(INVALID_CODE, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            verify_phone(user, record.target)
+        except PhoneTaken:
+            return Response(
+                {"error": "This number is already verified on another QuickSurf account.", "code": "phone_taken"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(ProfileSerializer(user).data)
 
 
 @extend_schema(

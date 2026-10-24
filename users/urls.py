@@ -10,6 +10,8 @@ from .views import (
     MeView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
+    PhoneConfirmView,
+    PhoneRequestView,
     PinView,
     RegisterView,
     VerifyEmailConfirmView,
@@ -29,6 +31,8 @@ urlpatterns = [
     path("password-reset/request/", PasswordResetRequestView.as_view(), name="password-reset-request"),
     path("password-reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
     path("pin/", PinView.as_view(), name="user-pin"),
+    path("phone/request/", PhoneRequestView.as_view(), name="phone-request"),
+    path("phone/confirm/", PhoneConfirmView.as_view(), name="phone-confirm"),
     path("me/", MeView.as_view(), name="user-me"),
     path("me/password/", ChangePasswordView.as_view(), name="user-change-password"),
 ]

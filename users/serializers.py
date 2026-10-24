@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from services.serializers import normalize_ng_phone
 
+from . import limits
 from .models import TransactionPin
 
 User = get_user_model()
@@ -50,6 +51,16 @@ class CodeSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=6)
 
 
+class PhoneSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=20)
+
+    def validate_phone(self, value):
+        normalized = normalize_ng_phone(value)
+        if not normalized:
+            raise serializers.ValidationError("Enter a Nigerian number like 0803xxxxxxx or +234803xxxxxxx.")
+        return normalized
+
+
 class PasswordResetRequestSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
@@ -72,23 +83,32 @@ class PinSerializer(serializers.Serializer):
 
 class ProfileSerializer(serializers.ModelSerializer):
     email_verified = serializers.BooleanField(read_only=True)
+    phone_verified = serializers.BooleanField(read_only=True)
     has_pin = serializers.SerializerMethodField()
+    limits = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ("id", "email", "first_name", "last_name", "phone", "email_verified", "has_pin", "date_joined")
-        read_only_fields = ("id", "email", "date_joined")
+        fields = (
+            "id",
+            "email",
+            "first_name",
+            "last_name",
+            "phone",
+            "email_verified",
+            "phone_verified",
+            "has_pin",
+            "limits",
+            "date_joined",
+        )
+        # The phone number is only set by confirming a texted code (/users/phone/...).
+        read_only_fields = ("id", "email", "phone", "date_joined")
 
     def get_has_pin(self, user) -> bool:
         return TransactionPin.objects.filter(user=user).exists()
 
-    def validate_phone(self, value):
-        if not value:
-            return ""
-        normalized = normalize_ng_phone(value)
-        if not normalized:
-            raise serializers.ValidationError("Enter a Nigerian number like 0803xxxxxxx or +234803xxxxxxx.")
-        return normalized
+    def get_limits(self, user) -> dict:
+        return limits.summary(user)
 
 
 class ChangePasswordSerializer(serializers.Serializer):

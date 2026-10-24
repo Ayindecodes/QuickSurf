@@ -2,21 +2,24 @@ import importlib
 import re
 from datetime import timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.apps import apps
 from django.core import mail
 from django.core.cache import cache
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from core.models import LoginActivity
+from notifications import sms
 from notifications.models import EmailLog
 from services.models import ProviderLog
+from users import limits
 from users.models import OneTimeCode, TransactionPin, User
-from users.security import set_pin
+from users.security import close_account, set_pin
 from wallets import services as wallet_services
 from wallets.models import Wallet
 
@@ -328,22 +331,18 @@ class ProfileTests(AuthTestCase):
         self.client.force_authenticate(self.user)
         self.url = reverse("user-me")
 
-    def test_get_and_patch_profile_normalises_the_phone_and_ignores_the_email(self):
+    def test_get_and_patch_profile_ignores_email_and_phone(self):
         response = self.client.patch(
             self.url, {"last_name": "Obi", "phone": "+2348031234567", "email": "new@example.com"}, format="json"
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["phone"], "08031234567")
         self.assertEqual(response.data["email"], "me@example.com")
+        self.assertEqual(response.data["phone"], "")  # only an SMS code can set it
+        self.assertFalse(response.data["phone_verified"])
         self.assertFalse(response.data["has_pin"])
+        self.assertEqual(response.data["limits"]["level"], "basic")
         self.assertEqual(self.client.get(self.url).data["last_name"], "Obi")
-
-    def test_patch_rejects_a_number_that_is_not_nigerian(self):
-        response = self.client.patch(self.url, {"phone": "12345"}, format="json")
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("phone", response.data)
 
     def test_change_password_signs_out_other_devices_and_returns_new_tokens(self):
         old_refresh = self._login("me@example.com").data["refresh"]
@@ -397,3 +396,174 @@ class ProfileTests(AuthTestCase):
         self.assertEqual(
             self.client.post(reverse("token_refresh"), {"refresh": refresh}, format="json").status_code, 401
         )
+
+
+@override_settings(SMS_BACKEND="locmem")
+class PhoneVerificationTests(AuthTestCase):
+    def setUp(self):
+        super().setUp()
+        sms.outbox.clear()
+        self.user = User.objects.create_user(
+            email="phone@example.com", password=STRONG, email_verified_at=timezone.now()
+        )
+        self.client.force_authenticate(self.user)
+
+    def _request(self, phone="+234 803 123 4567"):
+        return self.client.post(reverse("phone-request"), {"phone": phone}, format="json")
+
+    def _texted_code(self):
+        return re.search(r"\b(\d{6})\b", sms.outbox[-1][1]).group(1)
+
+    def _confirm(self, code):
+        return self.client.post(reverse("phone-confirm"), {"code": code}, format="json")
+
+    def test_texted_code_verifies_the_number_and_raises_the_level(self):
+        requested = self._request()
+        confirmed = self._confirm(self._texted_code())
+
+        self.assertEqual(requested.status_code, status.HTTP_200_OK)
+        self.assertEqual(sms.outbox[-1][0], "08031234567")
+        self.assertEqual(confirmed.status_code, status.HTTP_200_OK)
+        self.assertEqual((confirmed.data["phone"], confirmed.data["phone_verified"]), ("08031234567", True))
+        self.assertEqual(confirmed.data["limits"]["level"], "verified")
+
+    def test_wrong_codes_fail_and_the_code_dies_after_five_tries(self):
+        self._request()
+        code = self._texted_code()
+        wrong = [self._confirm("000000" if code != "000000" else "111111").status_code for _ in range(5)]
+
+        self.assertEqual(set(wrong), {status.HTTP_400_BAD_REQUEST})
+        self.assertEqual(self._confirm(code).status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(User.objects.get(pk=self.user.pk).phone_verified)
+
+    def test_a_number_verifies_on_one_account_only(self):
+        other = User.objects.create_user(email="other@example.com", password=STRONG)
+        self._request()
+        code = self._texted_code()
+        self.client.force_authenticate(other)
+        self._request()
+        other_code = self._texted_code()
+
+        self.client.force_authenticate(self.user)
+        first = self._confirm(code)
+        self.client.force_authenticate(other)
+        second = self._confirm(other_code)  # its code was sent before the number was taken
+        third = self._request()
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(second.data["code"], "phone_taken")
+        self.assertEqual(third.status_code, status.HTTP_409_CONFLICT)
+        self.assertFalse(User.objects.get(pk=other.pk).phone_verified)
+
+    def test_resend_waits_a_minute_and_sms_failures_are_reported(self):
+        self._request()
+        too_soon = self._request()
+        OneTimeCode.objects.update(created_at=timezone.now() - timedelta(minutes=2))
+        with patch("users.views.send_phone_code", return_value=False):
+            failed = self._request()
+
+        self.assertEqual(too_soon.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(failed.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(failed.data["code"], "sms_failed")
+
+    def test_closing_the_account_frees_the_number(self):
+        self._request()
+        self._confirm(self._texted_code())
+
+        close_account(User.objects.get(pk=self.user.pk))
+
+        self.assertFalse(User.objects.filter(phone="08031234567", phone_verified_at__isnull=False).exists())
+
+
+class SmsBackendTests(TestCase):
+    @override_settings(SMS_BACKEND="console", IS_PRODUCTION=True)
+    def test_console_backend_never_prints_codes_in_production(self):
+        with patch("builtins.print") as printed, self.assertLogs("notifications.sms", level="ERROR"):
+            self.assertFalse(sms.send_sms("08031234567", "Your QuickSurf code is 123456."))
+        printed.assert_not_called()
+
+    @override_settings(SMS_BACKEND="termii", TERMII_API_KEY="key", TERMII_SENDER_ID="QuickSurf", TERMII_CHANNEL="dnd")
+    def test_termii_gets_the_international_number_and_reports_failures(self):
+        ok = Mock(status_code=200, headers={"Content-Type": "application/json"})
+        ok.json.return_value = {"message_id": "123", "message": "Successfully Sent"}
+        refused = Mock(status_code=400, headers={"Content-Type": "application/json"})
+        refused.json.return_value = {"message": "Insufficient balance"}
+
+        with patch("notifications.sms.requests.post", return_value=ok) as post:
+            self.assertTrue(sms.send_sms("08031234567", "hello"))
+        payload = post.call_args.kwargs["json"]
+        with (
+            patch("notifications.sms.requests.post", return_value=refused),
+            self.assertLogs("notifications.sms", "ERROR"),
+        ):
+            self.assertFalse(sms.send_sms("08031234567", "hello"))
+
+        self.assertEqual(
+            (payload["to"], payload["from"], payload["channel"], payload["api_key"]),
+            ("2348031234567", "QuickSurf", "dnd", "key"),
+        )
+
+
+@override_settings(
+    TRANSACTION_PIN_REQUIRED=False, BASIC_DAILY_PURCHASE_LIMIT=500, DAILY_PURCHASE_LIMIT=5000, NEW_ACCOUNT_DAILY_LIMIT=0
+)
+class VerificationLevelTests(AuthTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user(
+            email="levels@example.com", password=STRONG, email_verified_at=timezone.now()
+        )
+        wallet_services.credit_topup(self.user, Decimal("3000.00"), "PAY-LEVELS")
+        self.client.force_authenticate(self.user)
+
+    def _buy(self, reference, amount="400"):
+        with patch("services.views.purchase_airtime", return_value=DELIVERED):
+            return self.client.post(
+                reverse("airtime-purchase"),
+                {"amount": amount, "network": "mtn", "phone": "08031234567", "client_reference": reference},
+                format="json",
+            )
+
+    def test_basic_accounts_get_the_basic_limit_until_the_phone_is_verified(self):
+        self.assertEqual(self._buy("LV-1").status_code, status.HTTP_201_CREATED)
+        refused = self._buy("LV-2")
+        User.objects.filter(pk=self.user.pk).update(phone="08031234567", phone_verified_at=timezone.now())
+        self.user.refresh_from_db()
+        self.client.force_authenticate(self.user)
+        allowed = self._buy("LV-3")
+
+        self.assertEqual(refused.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual((refused.data["code"], refused.data["level"]), ("daily_limit", "basic"))
+        self.assertEqual(allowed.status_code, status.HTTP_201_CREATED)
+
+    def test_a_flagged_account_drops_back_to_basic(self):
+        User.objects.filter(pk=self.user.pk).update(
+            phone="08031234567", phone_verified_at=timezone.now(), flagged_at=timezone.now(), flag_reason="test"
+        )
+        self.user.refresh_from_db()
+
+        self.assertEqual(limits.level(self.user), "basic")
+        self.assertEqual(limits.daily_purchase_limit(self.user), 500)
+
+
+@override_settings(DEVICE_MAX_ACCOUNTS=3)
+class DeviceCheckTests(AuthTestCase):
+    def _sign_in_everyone(self, count, **headers):
+        emails = [f"dev{i}-{len(headers)}@example.com" for i in range(count)]
+        for email in emails:
+            User.objects.create_user(email=email, password=STRONG)
+            self.client.post(reverse("user-login"), {"email": email, "password": STRONG}, format="json", **headers)
+        return [User.objects.get(email=email) for email in emails]
+
+    def test_one_device_signing_in_to_too_many_accounts_flags_the_newest(self):
+        users = self._sign_in_everyone(4, HTTP_X_DEVICE_ID="device-abc")
+
+        self.assertEqual([bool(u.flagged_at) for u in users], [False, False, False, True])
+        self.assertIn("4 accounts", users[3].flag_reason)
+        self.assertEqual(LoginActivity.objects.filter(user=users[0]).first().device_fingerprint, "d:device-abc")
+
+    def test_without_an_app_device_id_shared_ips_never_flag_anyone(self):
+        users = self._sign_in_everyone(5)  # same browser and IP for all: like a busy mobile network
+
+        self.assertFalse(any(u.flagged_at for u in users))
