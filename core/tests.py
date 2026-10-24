@@ -687,3 +687,18 @@ class FlaggedAccountTests(TestCase):
         self.assertTrue(
             LogEntry.objects.filter(object_id=str(user.pk), change_message__startswith="Cleared fraud flag").exists()
         )
+
+
+@override_settings(CORS_ALLOWED_ORIGINS=["https://app.example.com"], CORS_ALLOW_ALL_ORIGINS=False)
+class CorsTests(TestCase):
+    def test_the_app_may_send_its_device_id_and_read_the_request_id(self):
+        preflight = self.client.options(
+            "/api/v1/users/login/",
+            HTTP_ORIGIN="https://app.example.com",
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD="POST",
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS="content-type,x-device-id",
+        )
+        response = self.client.get("/api/v1/health/", HTTP_ORIGIN="https://app.example.com")
+
+        self.assertIn("x-device-id", preflight["Access-Control-Allow-Headers"].lower())
+        self.assertIn("x-request-id", response["Access-Control-Expose-Headers"].lower())

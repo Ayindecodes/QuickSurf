@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import dj_database_url
+from corsheaders.defaults import default_headers as default_cors_headers
 from decouple import Csv, config
 from django.core.exceptions import ImproperlyConfigured
 
@@ -332,6 +333,9 @@ if FRONTEND_URL:
 # Auth is a Bearer header, so browsers never need to send cookies cross-origin.
 CORS_ALLOW_CREDENTIALS = False
 CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
+# The app sends its device ID (fraud checks, users/risk.py) and may read the request ID from errors.
+CORS_ALLOW_HEADERS = (*default_cors_headers, "x-device-id")
+CORS_EXPOSE_HEADERS = ["X-Request-ID"]
 
 # -------------------------------------------------------------------
 # Security (good defaults for HTTPS)
