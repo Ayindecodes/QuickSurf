@@ -35,7 +35,7 @@ def error_envelope(data, status_code: int) -> dict:
             if key in ("error", "detail"):
                 message = str(value)
                 code = code or getattr(value, "code", None)
-            elif key == "code":
+            elif key == "code" and not isinstance(value, (list, dict)):  # a list is a form field named "code"
                 code = str(value)
             elif key in ("request_id", "messages"):  # messages: simplejwt's token internals, not field errors
                 continue
