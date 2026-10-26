@@ -1,30 +1,38 @@
 import csv
 import io
+import json
+import logging
 import os
 import subprocess
 import sys
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
 from allauth.mfa.models import Authenticator
 from django.conf import settings
+from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Group
+from django.core import mail
+from django.core.cache import cache
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
+from core.alerts import BAD_WEBHOOK_SIGNATURES, count_event, event_count
 from core.net import client_ip
 from core.privacy import mask_pii
+from core.request_id import JsonFormatter, RequestIdFilter, _current
 from notifications.models import EmailLog
 from notifications.utils import send_email
 from payments.models import PaymentIntent
 from services.models import AirtimeTransaction, DataTransaction, ProviderLog
-from users.models import User
+from users.models import TransactionPin, User
 from wallets import services as wallet_services
-from wallets.models import Wallet
+from wallets.models import Transaction, Wallet
 
 PHONE = "08031234567"
 REDIS_THAT_IS_DOWN = {
@@ -266,6 +274,13 @@ class RequestSafetyTests(APITestCase):
         self.assertEqual(response.json()["code"], "server_error")
         self.assertNotIn("hunter2", response.content.decode())
 
+    def test_api_docs_build_and_list_each_operation_once(self):
+        response = self.client.get("/api/schema/", {"format": "json"})
+
+        paths = json.loads(response.content)["paths"]
+        self.assertIn("/api/users/login/", paths)
+        self.assertNotIn("/api/users/login", paths)  # the no-slash alias still works but isn't documented
+
     def test_logs_get_masked_phone_numbers_and_no_secrets(self):
         masked = mask_pii(
             {
@@ -352,3 +367,216 @@ class EmailTests(TestCase):
         self.assertFalse(sent)
         self.assertEqual(log.status, "failed")
         self.assertIn("SMTP server unreachable", log.error)
+
+
+class RequestIdTests(APITestCase):
+    def test_every_response_carries_a_request_id_and_a_sane_incoming_one_is_kept(self):
+        fresh = self.client.get("/api/health/")
+        kept = self.client.get("/api/health/", HTTP_X_REQUEST_ID="render-abc12345")
+        replaced = self.client.get("/api/health/", HTTP_X_REQUEST_ID="<script>alert(1)</script>")
+
+        self.assertRegex(fresh["X-Request-ID"], r"^[0-9a-f]{32}$")
+        self.assertEqual(kept["X-Request-ID"], "render-abc12345")
+        self.assertRegex(replaced["X-Request-ID"], r"^[0-9a-f]{32}$")
+
+    def test_error_responses_include_the_request_id(self):
+        self.client.force_authenticate(User.objects.create_user(email="rid@example.com", password="Pass-Phrase-9"))
+
+        with (
+            patch("wallets.views.Wallet.objects.get", side_effect=RuntimeError("boom")),
+            self.assertLogs("core.exceptions", level="ERROR"),
+        ):
+            response = self.client.get(reverse("wallet-balance"))
+
+        self.assertEqual(response.json()["request_id"], response["X-Request-ID"])
+
+    def test_log_lines_carry_the_request_id_as_json(self):
+        record = logging.LogRecord("services.views", logging.ERROR, __file__, 1, "Purchase %s failed", ("REF-1",), None)
+        token = _current.set("abc123def456")
+        try:
+            RequestIdFilter().filter(record)
+        finally:
+            _current.reset(token)
+
+        late = logging.LogRecord("django.request", logging.ERROR, __file__, 1, "Internal Server Error", (), None)
+        late.request = RequestFactory().get("/")
+        late.request.request_id = "from-the-request"
+        RequestIdFilter().filter(late)
+        self.assertEqual(late.request_id, "from-the-request")
+
+        entry = json.loads(JsonFormatter().format(record))
+        self.assertEqual(
+            {k: entry[k] for k in ("level", "logger", "request_id", "message")},
+            {
+                "level": "ERROR",
+                "logger": "services.views",
+                "request_id": "abc123def456",
+                "message": "Purchase REF-1 failed",
+            },
+        )
+
+
+class SentryTests(SimpleTestCase):
+    def test_a_dsn_turns_sentry_on_without_sending_request_bodies(self):
+        code = (
+            "import quicksurf.settings, sentry_sdk; client = sentry_sdk.get_client(); "
+            "print(client.is_active(), client.options['max_request_body_size'], client.options['send_default_pii'])"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=settings.BASE_DIR,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "SENTRY_DSN": "https://public@o0.ingest.sentry.io/1"},
+        )
+
+        self.assertEqual(result.stdout.split(), ["True", "never", "False"], result.stderr)
+
+
+@override_settings(OPS_ALERT_EMAILS=["ops@example.com"])
+class OpsAlertTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(email="ops-user@example.com", password="Pass-Phrase-9")
+
+    def test_all_clear_sends_nothing(self):
+        out = io.StringIO()
+        with patch("core.management.commands.ops_alerts.get_balance", return_value=Decimal("50000.00")):
+            call_command("ops_alerts", stdout=out)
+
+        self.assertIn("All clear", out.getvalue())
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_problems_are_logged_emailed_once_and_fail_the_command(self):
+        stuck = AirtimeTransaction.objects.create(
+            user=self.user,
+            network="mtn",
+            phone=PHONE,
+            amount=Decimal("300"),
+            status="pending",
+            client_reference="STUCK-OPS",
+        )
+        AirtimeTransaction.objects.filter(pk=stuck.pk).update(timestamp=timezone.now() - timedelta(hours=2))
+        for i in range(5):
+            AirtimeTransaction.objects.create(
+                user=self.user,
+                network="mtn",
+                phone=PHONE,
+                amount=Decimal("100"),
+                status="failed",
+                client_reference=f"FAIL-OPS-{i}",
+                raw_response={"code": "018"},
+            )
+        PaymentIntent.objects.create(user=self.user, amount=Decimal("500"), reference="PAY-REVIEW", status="review")
+        Wallet.objects.filter(user=self.user).update(balance=Decimal("999.00"))  # outside the ledger
+        for _ in range(10):
+            count_event(BAD_WEBHOOK_SIGNATURES)
+
+        with patch("core.management.commands.ops_alerts.get_balance", return_value=Decimal("500.00")):
+            with (
+                self.assertLogs("core.management.commands.ops_alerts", level="ERROR") as logs,
+                self.assertRaises(CommandError),
+            ):
+                call_command("ops_alerts", stdout=io.StringIO())
+            with self.assertLogs("core.management.commands.ops_alerts", level="ERROR"), self.assertRaises(CommandError):
+                call_command("ops_alerts", stdout=io.StringIO())  # 15 minutes later: same problems
+
+        self.assertEqual(len(logs.records), 6)
+        self.assertEqual(len(mail.outbox), 1)  # not emailed again for the same problems
+        body = mail.outbox[0].body
+        for expected in (
+            "1 purchase(s) pending",
+            "5 of 5 purchases failed",
+            "code: 018",
+            "PAY-REVIEW",
+            "₦500.00",
+            "don't match their ledger",
+            "10 Paystack webhooks rejected",
+        ):
+            self.assertIn(expected, body)
+
+    def test_rejected_paystack_webhooks_are_counted(self):
+        with self.assertLogs("payments.views", level="WARNING"):
+            response = self.client.post(
+                reverse("payments_webhook"),
+                data="{}",
+                content_type="application/json",
+                HTTP_X_PAYSTACK_SIGNATURE="forged",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(event_count(BAD_WEBHOOK_SIGNATURES), 1)
+
+
+@override_settings(OPS_ALERT_EMAILS=["ops@example.com"], PAYSTACK_SECRET_KEY="sk_test_report")
+class DailyReportTests(TestCase):
+    def test_totals_and_paystack_mismatches_are_reported(self):
+        start = timezone.make_aware(datetime.combine(datetime(2026, 10, 20).date(), time.min))
+        user = User.objects.create_user(email="report@example.com", password="Pass-Phrase-9")
+        PaymentIntent.objects.create(user=user, amount=Decimal("1500"), reference="PAY-A", status="pending")
+        wallet_services.credit_topup(user, Decimal("1500"), "PAY-A")
+        PaymentIntent.objects.filter(reference="PAY-A").update(status="success", paid_at=start + timedelta(hours=2))
+        Transaction.objects.filter(reference="PAY-A").update(timestamp=start + timedelta(hours=2))
+        PaymentIntent.objects.create(user=user, amount=Decimal("500"), reference="PAY-B", status="pending")
+        PaymentIntent.objects.create(
+            user=user, amount=Decimal("700"), reference="PAY-C", status="success", paid_at=start + timedelta(hours=4)
+        )
+        paystack = [
+            {"reference": "PAY-A", "amount": 150000, "paid_at": "2026-10-20T01:00:00.000Z"},
+            {"reference": "PAY-B", "amount": 50000, "paid_at": "2026-10-20T02:00:00.000Z"},
+        ]
+        out = io.StringIO()
+
+        with (
+            patch("core.management.commands.daily_report.list_successful", return_value=paystack),
+            self.assertRaises(CommandError) as failure,
+        ):
+            call_command("daily_report", "--date", "2026-10-20", stdout=out)
+
+        self.assertIn("Top-ups credited:   1 totalling ₦1500.00", out.getvalue())
+        self.assertIn("paid at Paystack but not credited: PAY-B", str(failure.exception))
+        self.assertIn("credited but Paystack shows no successful payment: PAY-C", str(failure.exception))
+        self.assertNotIn("PAY-A", str(failure.exception))
+        self.assertIn("2 Paystack mismatch(es)", mail.outbox[0].subject)
+
+    @override_settings(PAYSTACK_SECRET_KEY="")
+    def test_without_a_paystack_key_the_reconciliation_is_skipped(self):
+        out = io.StringIO()
+
+        call_command("daily_report", stdout=out)
+
+        self.assertIn("Paystack reconciliation skipped", out.getvalue())
+
+
+@override_settings(STORAGES=PLAIN_STATIC)
+class SupportAdminTests(TestCase):
+    def setUp(self):
+        self.client.force_login(User.objects.create_superuser(email="support@example.com", password="Pass-Phrase-9"))
+        self.customer = User.objects.create_user(email="customer@example.com", password="Pass-Phrase-9")
+        TransactionPin.objects.create(
+            user=self.customer, pin_hash="x", locked_until=timezone.now() + timedelta(minutes=30)
+        )
+
+    def test_customers_and_their_purchases_can_be_searched(self):
+        users = self.client.get(reverse("admin:users_user_changelist"), {"q": "customer"})
+        purchases = self.client.get(
+            reverse("admin:services_airtimetransaction_changelist"), {"q": "customer@example.com"}
+        )
+        detail = self.client.get(reverse("admin:users_user_change", args=[self.customer.pk]))
+        sign_ins = self.client.get(reverse("admin:core_loginactivity_changelist"))
+
+        self.assertContains(users, "customer@example.com")
+        self.assertEqual((purchases.status_code, detail.status_code, sign_ins.status_code), (200, 200, 200))
+
+    def test_support_actions_work_and_are_recorded_in_the_history(self):
+        url = reverse("admin:users_user_changelist")
+        for action in ("unlock_pin", "sign_out_everywhere", "mark_email_verified"):
+            self.client.post(url, {"action": action, "_selected_action": [self.customer.pk]})
+
+        self.customer.refresh_from_db()
+        self.assertIsNone(TransactionPin.objects.get(user=self.customer).locked_until)
+        self.assertTrue(self.customer.email_verified)
+        history = LogEntry.objects.filter(object_id=str(self.customer.pk)).values_list("change_message", flat=True)
+        self.assertEqual(
+            sorted(history), ["Marked email as verified", "Signed out on all devices", "Unlocked transaction PIN"]
+        )

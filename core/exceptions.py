@@ -5,6 +5,8 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
+from .request_id import current_request_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,7 +17,11 @@ def api_exception_handler(exc, context):
         view = context.get("view")
         logger.error("Unhandled error in %s", view.__class__.__name__ if view else "API", exc_info=exc)
         return Response(
-            {"error": "Something went wrong. Please try again.", "code": "server_error"},
+            {
+                "error": "Something went wrong. Please try again.",
+                "code": "server_error",
+                "request_id": current_request_id(),
+            },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
     return response
