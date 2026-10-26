@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Callable, Dict, Optional, Tuple, Any
 
 import requests
@@ -97,11 +98,15 @@ def _request(
     params: Optional[Dict] = None,
     timeout: Tuple[int, int] = DEFAULT_TIMEOUT,
     retries: int = MAX_RETRIES,
+    resend_safe: bool = True,
     log_fn: Optional[Callable[[Dict], None]] = None,
 ) -> Tuple[int, Dict]:
     """
-    Minimal retry loop for transient network errors only (connect/read timeouts).
-    Never retries on any HTTP response to avoid duplicate provider charges.
+    Minimal retry loop for transient network errors only; never retries on an HTTP response.
+    A connect timeout means the request never reached VTpass, so it is always safe to retry.
+    Any other network error may come after VTpass received the request, so it is only retried
+    when resend_safe (never for /pay, which would risk a second charge). Network errors come
+    back as code "999", which callers must treat as an unknown outcome, not a failure.
     """
     url = f"{VTPASS_BASE_URL}{path}"
     last_exc: Optional[Exception] = None
@@ -132,7 +137,7 @@ def _request(
                 requests.exceptions.ReadTimeout,
                 requests.exceptions.ConnectionError) as e:
             last_exc = e
-            if attempt < retries:
+            if attempt < retries and (resend_safe or isinstance(e, requests.exceptions.ConnectTimeout)):
                 time.sleep(0.8)
                 continue
             parsed_err = {
@@ -155,41 +160,76 @@ def _request(
     raise RuntimeError(f"Unexpected _request flow. Last error: {last_exc}")
 
 
-def generate_request_id(prefix: str = "") -> str:
+LAGOS = timezone(timedelta(hours=1), "Africa/Lagos")  # no daylight saving
+
+
+def generate_request_id() -> str:
     """
-    First 12 chars must be Lagos time YYYYMMDDHHMM (>=12 chars total).
-    Docs: Request ID Format.
+    VTpass request ID: today's date and time in Africa/Lagos as YYYYMMDDHHII, then random
+    alphanumerics (https://www.vtpass.com/documentation/how-to-generate-request-id/).
     """
-    now = datetime.utcnow() + timedelta(hours=1)  # Africa/Lagos (UTC+1)
-    base = now.strftime("%Y%m%d%H%M")
-    return f"{base}{uuid.uuid4().hex[:12].upper()}"
+    return datetime.now(LAGOS).strftime("%Y%m%d%H%M") + uuid.uuid4().hex[:12].upper()
 
 
 # ============================================================================
-# Mapping helpers (strict per VTU docs)
+# Mapping helpers (https://www.vtpass.com/documentation/response-codes/)
 # ============================================================================
+
+# Codes meaning VTpass did not and will not deliver, so the held money can be refunded.
+FAILED_CODES = {
+    "010",  # variation code does not exist
+    "011",  # invalid arguments
+    "012",  # product does not exist
+    "013",  # below minimum amount
+    "015",  # invalid request id (on requery: VTpass never received the purchase)
+    "016",  # transaction failed
+    "017",  # above maximum amount
+    "018",  # low wallet balance (our VTpass wallet)
+    "019",  # likely duplicate transaction (refused)
+    "021", "022", "023", "024",  # account locked / suspended / no API access / inactive
+    "027",  # IP not whitelisted
+    "028",  # product not whitelisted on account
+    "030",  # biller not reachable
+    "031", "032",  # quantity limits
+    "034", "035",  # service suspended / inactive
+    "085",  # improper request id
+    "087",  # invalid credentials
+    "091",  # transaction not processed
+}
+REVERSED_CODES = {"040"}  # transaction reversal: VTpass returned the money to our wallet
+
 
 def _tx_dict(body: Dict) -> Dict:
-    return body.get("content", {}).get("transactions", {}) if isinstance(body, dict) else {}
+    content = body.get("content") if isinstance(body, dict) else None
+    tx = content.get("transactions") if isinstance(content, dict) else None
+    return tx if isinstance(tx, dict) else {}
 
 
 def strict_map_outcome(body: Dict) -> str:
     """
-    Success only when: code == "000" AND transactions.status == "delivered".
-    Pending when: transactions.status == "pending" OR code in {"099","016"}.
-    Failed otherwise (incl. 027/028 etc.).
+    "successful" only for code 000 with status delivered; "reversed" for code 040 or status
+    reversed; "failed" only for codes that mean VTpass won't deliver (or status failed).
+    Everything else (099 processing, 014 request id already used, 083 system error, 999 our
+    network error, unknown codes, unreadable bodies) is "pending": the outcome is unknown, so
+    the money stays held until a requery or a VTpass callback settles it.
     """
-    try:
-        code = str(body.get("code", "")).strip()
-        tx = _tx_dict(body)
-        tx_status = str(tx.get("status", "")).lower()
-        if code == "000" and tx_status == "delivered":
-            return "successful"
-        if tx_status == "pending" or code in {"099", "016"}:
-            return "pending"
-    except Exception:
-        pass
-    return "failed"
+    if not isinstance(body, dict):
+        return "pending"
+    code = str(body.get("code", "")).strip()
+    tx_status = str(_tx_dict(body).get("status", "")).lower()
+    if code in REVERSED_CODES or tx_status == "reversed":
+        return "reversed"
+    if code in FAILED_CODES or tx_status == "failed":
+        return "failed"
+    if code == "000" and tx_status == "delivered":
+        return "successful"
+    return "pending"
+
+
+def transaction_id(body: Dict) -> Optional[str]:
+    """VTpass's own transactionId for a purchase, if the response has one."""
+    tx_id = _tx_dict(body).get("transactionId") or (body.get("transactionId") if isinstance(body, dict) else None)
+    return str(tx_id) if tx_id else None
 
 
 def extract_variations(content: Any) -> list:
@@ -207,14 +247,14 @@ AIRTIME_SERVICE_IDS = {
     "mtn": "mtn",
     "glo": "glo",
     "airtel": "airtel",
-    "9mobile": "9mobile",
+    "9mobile": "etisalat",  # VTpass still uses 9mobile's old name
 }
 
 DATA_SERVICE_IDS = {
     "mtn": "mtn-data",
     "glo": "glo-data",
     "airtel": "airtel-data",
-    "9mobile": "9mobile-data",
+    "9mobile": "etisalat-data",
 }
 
 
@@ -263,12 +303,12 @@ def purchase_airtime(
         "phone": str(phone),
     }
 
-    status_code, body = _request("POST", "/pay", json=payload, log_fn=log_fn)
+    status_code, body = _request("POST", "/pay", json=payload, resend_safe=False, log_fn=log_fn)
     outcome = strict_map_outcome(body if isinstance(body, dict) else {})
 
     return {
         "ok": outcome == "successful",
-        "state": outcome,                 # successful | pending | failed
+        "state": outcome,                 # successful | pending | failed | reversed
         "provider": body,
         "request_id": rid,
         "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
@@ -297,12 +337,12 @@ def purchase_data(
         "phone": str(phone),
     }
 
-    status_code, body = _request("POST", "/pay", json=payload, log_fn=log_fn)
+    status_code, body = _request("POST", "/pay", json=payload, resend_safe=False, log_fn=log_fn)
     outcome = strict_map_outcome(body if isinstance(body, dict) else {})
 
     return {
         "ok": outcome == "successful",
-        "state": outcome,                 # successful | pending | failed
+        "state": outcome,                 # successful | pending | failed | reversed
         "provider": body,
         "request_id": rid,
         "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
@@ -327,9 +367,21 @@ def requery_status(
 
     return {
         "ok": outcome == "successful",
-        "state": outcome,                 # successful | pending | failed
+        "state": outcome,                 # successful | pending | failed | reversed
         "provider": body,
         "request_id": request_id,
         "message": (body.get("response_description") if isinstance(body, dict) else "") or "",
         "http_status": status_code,
     }
+
+
+def get_balance() -> Optional[Decimal]:
+    """Our VTpass wallet balance, or None if VTpass couldn't be reached or answered oddly."""
+    status_code, body = _request("GET", "/balance")
+    contents = body.get("contents") if isinstance(body, dict) else None
+    raw = contents.get("balance") if isinstance(contents, dict) else None
+    try:
+        balance = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return None
+    return balance.quantize(Decimal("0.01")) if status_code == 200 and balance.is_finite() else None

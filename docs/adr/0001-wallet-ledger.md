@@ -29,6 +29,7 @@ from, and it allowed bugs such as one payment being credited twice.
    | `hold` | purchase started | − | + |
    | `capture` | purchase delivered | | − |
    | `release` | purchase failed (refund) | + | − |
+   | `reversal` | delivered purchase later reversed by VTpass (refund) | + | |
    | `adjustment` | staff correction, with a note and the staff user | ± | |
    | `opening` | balance carried over when the ledger started | ± | ± |
 
@@ -36,8 +37,10 @@ from, and it allowed bugs such as one payment being credited twice.
    - The pair `(type, reference)` is unique for `opening`, `topup`, `hold`, `capture` and
      `release`, so a Paystack reference can be credited once and a purchase can be held once.
    - A purchase's hold can be captured or released, but only once and never both.
-5. **Purchases are settled by `services/settlement.py`.** `successful` and `failed` are final:
-   later provider answers don't change them or move money again.
+5. **Purchases are settled by `services/settlement.py`.** `successful`, `failed` and `reversed`
+   are final: later provider answers don't change them or move money again. The one exception:
+   VTpass can reverse a delivered purchase, so `successful → reversed` is allowed and refunds the
+   spent money with a `reversal` entry.
 6. **Users can't lock or unlock money themselves.** Staff changes go through adjustments.
 
 ## Consequences

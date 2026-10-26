@@ -8,6 +8,7 @@ single database transaction:
   hold          purchase started            balance -, locked +
   capture       purchase delivered          locked -
   release       purchase failed (refund)    locked -, balance +
+  refund_capture  delivered purchase reversed by VTpass   balance +
   adjust        staff correction            balance +/-
 """
 from __future__ import annotations
@@ -107,6 +108,21 @@ def release(user, reference: str) -> bool:
         return False
     _record(wallet, Transaction.TYPE_RELEASE, held.amount,
             balance_delta=held.amount, locked_delta=-held.amount, reference=reference)
+    return True
+
+
+@transaction.atomic
+def refund_capture(user, reference: str) -> bool:
+    """
+    Give back money already spent on a purchase that VTpass later reversed. Returns False if the
+    purchase was never captured or was already refunded.
+    """
+    wallet = _locked_wallet(user)
+    entries = wallet.transactions.filter(reference=reference)
+    captured = entries.filter(type=Transaction.TYPE_CAPTURE).first()
+    if captured is None or entries.filter(type=Transaction.TYPE_REVERSAL).exists():
+        return False
+    _record(wallet, Transaction.TYPE_REVERSAL, captured.amount, balance_delta=captured.amount, reference=reference)
     return True
 
 
