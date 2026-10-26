@@ -30,7 +30,7 @@
   - `POST /api/users/login/` -> expect `200`, `access` + `refresh`
 - Wallet:
   - `GET /api/wallet/` with Bearer token -> expect `200`
-  - `POST /api/wallet/lock/` then `/unlock/` -> expect `201`
+  - `GET /api/wallet/transactions/` with Bearer token -> expect `200` (ledger entries)
 - Services:
   - `POST /api/services/airtime/` with a tiny amount -> expect `201` or controlled `4xx/5xx` with JSON
   - `POST /api/services/data/` with valid plan -> expect `201` or controlled `4xx/5xx` with JSON
@@ -43,6 +43,7 @@
 - Confirm logs show:
   - `BOOT ENV=production`
   - `PROVIDER_MODE=LIVE`
+- Run `python manage.py check_wallets` -> expect every wallet to match its ledger.
 - Confirm no repeated provider debits for same `client_reference`.
 - Confirm rewards and receipt email logs are created once per successful purchase.
 
