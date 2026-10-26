@@ -43,6 +43,25 @@ that touches balances. In short:
 - VTpass outcomes follow its documented response codes (`services/vtpass.py`). Anything
   unclear stays **pending**, with the money held, until a requery or VTpass callback settles it.
 
+## Accounts and security
+
+- **Passwords:** Django's strength rules apply. Emails are case-insensitive.
+- **Email verification:** a 6-digit code is emailed at sign-up (`/api/users/verify-email/...`), and is
+  needed before the first top-up. Accounts that existed before verification was added count as verified.
+- **Password reset:** `/api/users/password-reset/request/` then `/confirm/` with the emailed code.
+  Resetting signs the user out everywhere.
+- **Tokens:** JWT access tokens last `JWT_ACCESS_MINUTES` (default 60). Refresh tokens rotate on use;
+  `/api/users/logout/` revokes one, or all with `everywhere: true`.
+- **Transaction PIN:** purchases need a 4-digit `pin`, set with `/api/users/pin/` (which needs the
+  account password). Five wrong PINs lock purchases for 30 minutes.
+- **Limits:** per-IP limits on login, sign-up and reset, and per email on login. Per user on purchases
+  and top-ups. A lower daily cap applies to accounts under a day old.
+- **Staff:**
+  - sign in to the admin (at `ADMIN_URL`) through allauth, and must set up an authenticator app when
+    `STAFF_MFA_REQUIRED` (on in production);
+  - `python manage.py setup_staff_roles` creates the Support (read-only) and Finance (can adjust
+    wallets) groups.
+
 ## Code map
 
 | Path | What it does |
@@ -65,6 +84,7 @@ Run these on a schedule (Render cron jobs):
 | `python manage.py verify_pending_topups` | every 10 min | Credits paid Paystack top-ups that were never verified; abandons stale ones |
 | `python manage.py vtpass_balance --warn-below 10000` | hourly | Fails (and logs an error) when our VTpass wallet runs low |
 | `python manage.py check_wallets` | daily | Fails if any wallet doesn't equal the sum of its ledger |
+| `python manage.py purge_old_logs --apply` | weekly | Deletes logs older than 180 days and expired token records |
 
 One-off tools:
 

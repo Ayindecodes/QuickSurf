@@ -10,6 +10,8 @@ from typing import Callable, Dict, Optional, Tuple, Any
 import requests
 from django.conf import settings
 
+from core.privacy import mask_pii
+
 # ============================================================================
 # Configuration: one source of truth in quicksurf/settings.py (PROVIDER_MODE, VTPASS_*)
 # ============================================================================
@@ -63,30 +65,6 @@ def _safe_json(resp: requests.Response) -> Dict:
         return {"raw": getattr(resp, "text", ""), "http_status": resp.status_code}
 
 
-def _mask_value(val: Optional[str]) -> str:
-    if not val:
-        return ""
-    s = str(val)
-    if "@" in s:
-        name, _, domain = s.partition("@")
-        return (name[:2] + "***@" + domain) if name else "***@" + domain
-    if s.isdigit() and len(s) >= 7:
-        return f"{s[:3]}***{s[-4:]}"
-    if len(s) > 6:
-        return s[:3] + "***" + s[-3:]
-    return "***"
-
-
-def _mask_payload(payload: Dict) -> Dict:
-    if not payload:
-        return {}
-    masked = dict(payload)
-    for k in ["phone", "billersCode", "email", "secret-key", "public-key", "api-key"]:
-        if k in masked:
-            masked[k] = _mask_value(masked[k])
-    return masked
-
-
 def _request(
     method: str,
     path: str,
@@ -125,8 +103,8 @@ def _request(
                     "endpoint": path,
                     "status_code": resp.status_code,
                     "request_id": (json or params or {}).get("request_id"),
-                    "request": _mask_payload(json or params or {}),
-                    "response": _mask_payload(parsed),
+                    "request": mask_pii(json or params or {}),
+                    "response": mask_pii(parsed),
                 })
             return resp.status_code, parsed
 
@@ -149,8 +127,8 @@ def _request(
                     "endpoint": path,
                     "status_code": 0,
                     "request_id": (json or params or {}).get("request_id"),
-                    "request": _mask_payload(json or params or {}),
-                    "response": _mask_payload(parsed_err),
+                    "request": mask_pii(json or params or {}),
+                    "response": mask_pii(parsed_err),
                 })
             return 0, parsed_err
 
