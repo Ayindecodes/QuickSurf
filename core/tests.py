@@ -181,6 +181,12 @@ class AuditMoneyTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["checks"], {"database": "ok", "cache": "ok"})
 
+    def test_health_shows_the_deployed_version(self):
+        with patch.dict(os.environ, {"APP_VERSION": "b4097ee99247abc", "RENDER_GIT_COMMIT": ""}):
+            self.assertEqual(self.client.get("/api/health/").json()["version"], "b4097ee99247")
+        with patch.dict(os.environ, {"APP_VERSION": "", "RENDER_GIT_COMMIT": "0123456789abcdef"}):
+            self.assertEqual(self.client.get("/api/health/").json()["version"], "0123456789ab")
+
     @override_settings(CACHES=REDIS_THAT_IS_DOWN)
     def test_health_stays_up_when_only_the_cache_is_down(self):
         response = self.client.get("/api/health/")
@@ -261,6 +267,17 @@ class RequestSafetyTests(APITestCase):
 
         self.assertEqual(client_ip(spoofed), "10.0.0.1")
         self.assertEqual(client_ip(via_cloudflare), "41.58.1.2")
+
+    @override_settings(CLIENT_IP_HEADER="X-Real-IP")
+    def test_client_ip_behind_our_own_proxy_ignores_a_faked_cloudflare_header(self):
+        factory = RequestFactory()
+        via_caddy = factory.get(
+            "/", HTTP_X_REAL_IP="41.58.1.2", HTTP_CF_CONNECTING_IP="6.6.6.6", REMOTE_ADDR="172.18.0.5"
+        )
+        no_header = factory.get("/", HTTP_CF_CONNECTING_IP="6.6.6.6", REMOTE_ADDR="172.18.0.5")
+
+        self.assertEqual(client_ip(via_caddy), "41.58.1.2")
+        self.assertEqual(client_ip(no_header), "172.18.0.5")
 
     def test_unexpected_errors_return_json_without_internal_details(self):
         self.client.force_authenticate(User.objects.create_user(email="err@example.com", password="Pass-Phrase-9"))

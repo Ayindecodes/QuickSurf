@@ -1,20 +1,28 @@
 # Deploying QuickSurf
 
-QuickSurf has two deployments: this API on **Render** and the frontend
-([quicksurf-frontend](https://github.com/Ayindecodes/quicksurf-frontend)) on **Vercel**. Merging `main` in
-either repo deploys it. For the first launch, follow [docs/LAUNCH.md](docs/LAUNCH.md), which uses this page.
+QuickSurf has two parts: this API, and the frontend
+([quicksurf-frontend](https://github.com/Ayindecodes/quicksurf-frontend)) on **Vercel**.
+
+The API can run in either of two places:
+
+| Option | How it deploys | Guide |
+|---|---|---|
+| **A rented server (VPS)** | You run `deploy/deploy.sh deploy`. Caddy, Postgres, Redis, the scheduled jobs and encrypted backups run in Docker Compose | [deploy/README.md](deploy/README.md) |
+| **Render** | Merging `main` deploys it. Render runs the database, Redis and cron jobs | The "Render" section below |
+
+Everything else on this page applies to both. For the first launch, follow [docs/LAUNCH.md](docs/LAUNCH.md).
 
 ## Environments
 
 | | Backend | Providers | Frontend |
 |---|---|---|---|
 | Local | `docker compose up` (`.env` from `.env.example`) | VTpass sandbox, Paystack test | `npm run dev` |
-| Staging | Render service + its own database, `ENV=staging`, `DEBUG=False` | `PROVIDER_MODE=SANDBOX`, VTpass sandbox keys, Paystack `sk_test_` | Vercel preview pointing at staging |
-| Production | Render, `ENV=production` | `PROVIDER_MODE=LIVE`, live VTpass, Paystack `sk_live_` | Vercel production |
+| Staging | A second VPS stack or Render service with its own database, `ENV=staging`, `DEBUG=False` | `PROVIDER_MODE=SANDBOX`, VTpass sandbox keys, Paystack `sk_test_` | Vercel preview pointing at staging |
+| Production | VPS (`deploy/`) or Render, `ENV=production` | `PROVIDER_MODE=LIVE`, live VTpass, Paystack `sk_live_` | Vercel production |
 
 `ENV=production` insists on live keys, so staging uses another `ENV` value and sets `DEBUG=False` itself.
 
-## Render (backend)
+## Render (backend, if not self-hosting)
 
 Put the shared variables in an **Environment Group** and attach it to the web service and every cron
 job, so they can't drift apart.
@@ -58,6 +66,7 @@ Every variable is listed in `.env.production.example`. The ones that matter most
 | `ENV=production`, `DEBUG=False`, `SECRET_KEY` | Production refuses a `SECRET_KEY` under 50 characters |
 | `DATABASE_URL`, `DB_SSL_REQUIRE=True`, `REDIS_URL` | |
 | `ALLOWED_HOSTS` | The API's hostname |
+| `CLIENT_IP_HEADER` | `CF-Connecting-IP` on Render; `X-Real-IP` when self-hosted (the compose file sets it) |
 | `PROVIDER_MODE=LIVE`, `VTPASS_API_KEY`, `VTPASS_PUBLIC_KEY`, `VTPASS_SECRET_KEY` | Production refuses LIVE with sandbox URLs or missing keys |
 | `PAYSTACK_SECRET_KEY` (`sk_live_…`), `PAYSTACK_PUBLIC_KEY`, `PAYSTACK_WEBHOOK_SECRET` | Webhooks fail closed without the secret |
 | `FRONTEND_URL` | The frontend's origin. It is the only browser origin allowed (CORS) |
@@ -103,7 +112,8 @@ sandbox airtime purchase with its ledger entries.
 
 ## Rolling back
 
-See [runbooks/rollback.md](docs/runbooks/rollback.md). In short:
+See [runbooks/rollback.md](docs/runbooks/rollback.md). When self-hosting, `deploy/deploy.sh rollback` does
+the code part. In short:
 - use the kill switches first;
 - roll back the code with Render's "Rollback";
 - never roll the code back to before a migration that changed what old code relies on.

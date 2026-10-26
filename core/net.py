@@ -1,10 +1,18 @@
 # core/net.py
+from django.conf import settings
 
 
 def client_ip(request) -> str | None:
     """
-    The caller's IP address. On Render, requests arrive through Cloudflare, which sets
-    CF-Connecting-IP to the real client and overwrites any value the client sends.
-    X-Forwarded-For isn't trusted: its first entry is whatever the client chose to send.
+    The caller's IP address, from the header the proxy in front of us sets (CLIENT_IP_HEADER):
+    CF-Connecting-IP behind Cloudflare (Render), X-Real-IP behind our own Caddy (deploy/Caddyfile).
+    That proxy overwrites the header, so clients can't fake it. With no header configured, the
+    connection's address is used. X-Forwarded-For is never trusted: its first entry is whatever
+    the client chose to send.
     """
-    return request.META.get("HTTP_CF_CONNECTING_IP") or request.META.get("REMOTE_ADDR")
+    header = settings.CLIENT_IP_HEADER
+    if header:
+        value = request.META.get("HTTP_" + header.upper().replace("-", "_"), "").strip()
+        if value:
+            return value
+    return request.META.get("REMOTE_ADDR")

@@ -88,3 +88,26 @@ jobs:
 
       - name: Known vulnerabilities in dependencies
         run: pip-audit -r requirements.txt
+
+  # The self-hosting files (deploy/): scripts lint clean, the compose file is valid, and both images build.
+  deploy-files:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell scripts
+        run: shellcheck -x deploy/*.sh deploy/backup/*.sh
+
+      - name: Compose file is valid
+        working-directory: deploy
+        run: |
+          cp .env.example .env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci/' .env
+          docker compose -f compose.yml config --quiet
+
+      - name: Images build
+        run: |
+          docker build -t quicksurf-api:ci .
+          docker build -t quicksurf-backup:ci deploy/backup
+          docker run --rm quicksurf-api:ci supercronic -test deploy/crontab

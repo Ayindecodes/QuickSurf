@@ -1,0 +1,106 @@
+# QuickSurf API, self-hosted on one server: Caddy (HTTPS) -> gunicorn, plus the scheduled jobs, Postgres,
+# Redis and nightly encrypted backups. Run it with deploy/deploy.sh; settings live in deploy/.env.
+name: quicksurf
+
+x-app: &app
+  image: quicksurf-api:${APP_IMAGE_TAG:-latest}
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://quicksurf:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@db:5432/quicksurf
+    DB_SSL_REQUIRE: "False" # Postgres is only reachable on the private Docker network
+    REDIS_URL: redis://redis:6379/0
+    CLIENT_IP_HEADER: X-Real-IP # set by Caddy
+    APP_VERSION: ${APP_IMAGE_TAG:-} # the git commit, shown by /api/health/ and sent to Sentry
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_started
+  restart: unless-stopped
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  api:
+    <<: *app
+    build:
+      context: ..
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8000/api/health/', headers={'Host': os.environ['API_DOMAIN'], 'X-Forwarded-Proto': 'https'}), timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  scheduler:
+    <<: *app
+    command: ["supercronic", "-passthrough-logs", "/app/deploy/crontab"]
+
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN in deploy/.env}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+    logging: *logging
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: quicksurf
+      POSTGRES_USER: quicksurf
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quicksurf -d quicksurf"]
+      interval: 5s
+      retries: 20
+    shm_size: 256mb
+    restart: unless-stopped
+    logging: *logging
+    # No "ports:": the database must never be reachable from the internet.
+
+  redis:
+    # Locks, rate limits and cached plans only; nothing here needs to survive a restart.
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
+    restart: unless-stopped
+    logging: *logging
+
+  backup:
+    image: quicksurf-backup:latest
+    build: ./backup
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://quicksurf:${POSTGRES_PASSWORD}@db:5432/quicksurf
+    volumes:
+      - backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:
+  backups:
