@@ -1,16 +1,20 @@
+import csv
 import importlib
 import io
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from decimal import Decimal
 from unittest import skipUnless
+from unittest.mock import patch
 
 from django.apps import apps
 from django.contrib.auth.models import Permission
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -238,3 +242,77 @@ class WalletEndpointTests(APITestCase):
         entry = Transaction.objects.get(type="adjustment")
         self.assertEqual(entry.created_by, staff)
         self.assertEqual(Wallet.objects.get(user=self.user).balance, Decimal("1500.00"))
+
+
+DELIVERED = {"provider": {"code": "000", "content": {"transactions": {"status": "delivered"}}}}
+FAILED = {"provider": {"code": "011", "content": {"transactions": {"status": "failed"}}}}
+
+
+@override_settings(TRANSACTION_PIN_REQUIRED=False)
+class HistoryTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email="history@example.com", password="StrongPass123")
+        wallet_services.credit_topup(self.user, Decimal("2000.00"), "PAY-HIST")
+        self.client.force_authenticate(self.user)
+        self._buy("HIST-OK", DELIVERED)
+        self._buy("HIST-FAIL", FAILED)
+
+    def _buy(self, client_reference, provider_response):
+        with patch("services.views.purchase_airtime", return_value=provider_response):
+            self.client.post(
+                reverse("airtime-purchase"),
+                {"amount": "300", "network": "mtn", "phone": "08031234567", "client_reference": client_reference},
+                format="json",
+            )
+
+    def test_history_shows_one_line_per_money_movement_with_purchase_details(self):
+        response = self.client.get(reverse("wallet-history"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        lines = [(line["kind"], line["amount"], line["reference"]) for line in response.data["results"]]
+        self.assertEqual(
+            lines,
+            [
+                ("refund", "300.00", "HIST-FAIL"),
+                ("purchase", "-300.00", "HIST-FAIL"),
+                ("purchase", "-300.00", "HIST-OK"),
+                ("topup", "2000.00", "PAY-HIST"),
+            ],
+        )
+        bought = response.data["results"][2]
+        self.assertEqual((bought["status"], bought["phone"]), ("successful", "08031234567"))
+        self.assertEqual(bought["description"], "Airtime for 08031234567 (MTN)")
+        self.assertEqual(bought["balance_after"], "1700.00")
+
+    def test_history_filters_by_kind_and_date(self):
+        url = reverse("wallet-history")
+        tomorrow = timezone.localdate() + timedelta(days=1)
+
+        refunds = self.client.get(url, {"kind": "refund"}).data["results"]
+        future = self.client.get(url, {"date_from": tomorrow.isoformat()}).data["results"]
+
+        self.assertEqual([line["reference"] for line in refunds], ["HIST-FAIL"])
+        self.assertEqual(future, [])
+
+    def test_statement_is_a_csv_oldest_first(self):
+        response = self.client.get(reverse("wallet-statement"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "text/csv")
+        rows = list(csv.DictReader(io.StringIO(response.content.decode())))
+        self.assertEqual([row["kind"] for row in rows], ["topup", "purchase", "purchase", "refund"])
+        self.assertEqual(rows[-1]["balance_after"], "1700.00")
+
+    def test_statement_range_is_limited_to_a_year(self):
+        today = timezone.localdate()
+        too_long = self.client.get(
+            reverse("wallet-statement"), {"date_from": (today - timedelta(days=400)).isoformat()}
+        )
+        backwards = self.client.get(
+            reverse("wallet-statement"),
+            {"date_from": today.isoformat(), "date_to": (today - timedelta(days=1)).isoformat()},
+        )
+
+        self.assertEqual(too_long.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(too_long.data["code"], "invalid_range")
+        self.assertEqual(backwards.status_code, status.HTTP_400_BAD_REQUEST)

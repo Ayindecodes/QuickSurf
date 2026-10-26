@@ -3,6 +3,10 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from services.serializers import normalize_ng_phone
+
+from .models import TransactionPin
+
 User = get_user_model()
 
 
@@ -63,6 +67,36 @@ class LogoutSerializer(serializers.Serializer):
 
 class PinSerializer(serializers.Serializer):
     pin = serializers.CharField(max_length=4, min_length=4)
+    password = serializers.CharField(write_only=True)
+
+
+class ProfileSerializer(serializers.ModelSerializer):
+    email_verified = serializers.BooleanField(read_only=True)
+    has_pin = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ("id", "email", "first_name", "last_name", "phone", "email_verified", "has_pin", "date_joined")
+        read_only_fields = ("id", "email", "date_joined")
+
+    def get_has_pin(self, user) -> bool:
+        return TransactionPin.objects.filter(user=user).exists()
+
+    def validate_phone(self, value):
+        if not value:
+            return ""
+        normalized = normalize_ng_phone(value)
+        if not normalized:
+            raise serializers.ValidationError("Enter a Nigerian number like 0803xxxxxxx or +234803xxxxxxx.")
+        return normalized
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True)
+
+
+class CloseAccountSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
 
 

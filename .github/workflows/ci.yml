@@ -84,7 +84,7 @@ jobs:
         run: |
           coverage report
           coverage report --skip-covered --fail-under=85 \
-            --include="wallets/services.py,services/settlement.py,services/vtpass.py,services/views.py,payments/services.py,payments/views.py,payments/paystack.py,users/security.py"
+            --include="wallets/services.py,rewards/services.py,services/settlement.py,services/vtpass.py,services/views.py,payments/services.py,payments/views.py,payments/paystack.py,users/security.py"
 
       - name: Known vulnerabilities in dependencies
         run: pip-audit -r requirements.txt

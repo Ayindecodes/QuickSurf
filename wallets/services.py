@@ -9,6 +9,7 @@ single database transaction:
   capture       purchase delivered          locked -
   release       purchase failed (refund)    locked -, balance +
   refund_capture  delivered purchase reversed by VTpass   balance +
+  credit_reward   loyalty points redeemed     balance +
   adjust        staff correction            balance +/-
 """
 
@@ -79,6 +80,14 @@ def credit_topup(user, amount, reference: str) -> bool:
     amount = _money(amount)
     _record(wallet, Transaction.TYPE_TOPUP, amount, balance_delta=amount, reference=reference)
     return True
+
+
+@transaction.atomic
+def credit_reward(user, amount, reference: str) -> Transaction:
+    """Credit loyalty points redeemed as wallet money (see rewards/services.py)."""
+    wallet = _locked_wallet(user)
+    amount = _money(amount)
+    return _record(wallet, Transaction.TYPE_REWARD, amount, balance_delta=amount, reference=reference)
 
 
 @transaction.atomic

@@ -14,9 +14,9 @@ from django.utils.dateparse import parse_date
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serializer
+from rest_framework import generics, status
 from rest_framework import serializers as drf_serializers
-from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -29,12 +29,15 @@ from users.security import PinError, check_pin
 from wallets import services as wallet_services
 from wallets.models import Wallet
 
-from .models import AirtimeTransaction, DataTransaction, ProviderLog
+from .models import AirtimeTransaction, Beneficiary, DataTransaction, ProviderLog
+from .networks import detect_network
 from .serializers import (
     AirtimePurchaseRequestSerializer,
     AirtimeTransactionSerializer,
+    BeneficiarySerializer,
     DataPurchaseRequestSerializer,
     DataTransactionSerializer,
+    normalize_ng_phone,
 )
 from .settlement import FINAL_STATUSES, ledger_reference, purchase_kind, settle_purchase
 from .vtpass import (
@@ -226,15 +229,15 @@ def _sell_price(vtpass_price: Decimal) -> Decimal:
     return (vtpass_price * (1 + markup / 100)).quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
 
 
-def _data_plan_price(network: str, variation_code: str) -> Decimal | None:
+def _data_plan(network: str, variation_code: str) -> tuple[Decimal, str] | None:
     """
-    QuickSurf's price for a data plan, from VTpass's live plan list. Not cached: VTpass bills by
-    variation_code, so this, not the client's amount, is what the wallet must be charged.
+    QuickSurf's price and the name of a data plan, from VTpass's live plan list. Not cached: VTpass
+    bills by variation_code, so this price, not the client's amount, is what the wallet must be charged.
     Returns None when the plan doesn't exist for the network.
     """
     for plan in _vtpass_plans(network):
         if plan["code"] == variation_code:
-            return _sell_price(plan["vtpass_price"])
+            return _sell_price(plan["vtpass_price"]), plan["name"]
     return None
 
 
@@ -265,7 +268,7 @@ def _daily_limit_exceeded(user, amount: Decimal) -> int:
 
 def _daily_limit_response(limit: int):
     return Response(
-        {"error": f"Daily purchase limit of ₦{limit:,} reached. Try again tomorrow."},
+        {"error": f"Daily purchase limit of ₦{limit:,} reached. Try again tomorrow.", "code": "daily_limit"},
         status=status.HTTP_400_BAD_REQUEST,
     )
 
@@ -286,7 +289,10 @@ PURCHASE_ERROR = "Something went wrong with this purchase. If money was held, it
 
 
 def _reference_taken_response():
-    return Response({"error": "This client_reference is already in use."}, status=status.HTTP_409_CONFLICT)
+    return Response(
+        {"error": "This client_reference is already in use.", "code": "reference_in_use"},
+        status=status.HTTP_409_CONFLICT,
+    )
 
 
 # ---------- Requery ----------
@@ -318,7 +324,7 @@ def _refresh_from_vtpass(txn):
 # ---------- Kill switch ----------
 def _purchases_paused_response():
     return Response(
-        {"error": "Purchases are temporarily unavailable. Please try again later."},
+        {"error": "Purchases are temporarily unavailable. Please try again later.", "code": "purchases_paused"},
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
 
@@ -368,7 +374,7 @@ class AirtimePurchaseView(APIView):
         k_line = _lock_key_line(user.id, "airtime", network, phone)
         if not _acquire_purchase_locks(k_ref, k_line):
             return Response(
-                {"detail": "Another purchase is in progress for this reference/line."},
+                {"detail": "Another purchase is in progress for this reference/line.", "code": "purchase_in_progress"},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
@@ -407,7 +413,10 @@ class AirtimePurchaseView(APIView):
                 try:
                     wallet_services.hold(user, amt, ledger_reference("airtime", client_ref))
                 except wallet_services.InsufficientFunds:
-                    return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response(
+                        {"error": "Insufficient funds.", "code": "insufficient_funds"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
                 txn = AirtimeTransaction.objects.create(
                     user=user,
@@ -499,7 +508,7 @@ class DataPurchaseView(APIView):
         k_line = _lock_key_line(user.id, "data", network, phone)
         if not _acquire_purchase_locks(k_ref, k_line):
             return Response(
-                {"detail": "Another purchase is in progress for this reference/line."},
+                {"detail": "Another purchase is in progress for this reference/line.", "code": "purchase_in_progress"},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
@@ -523,19 +532,28 @@ class DataPurchaseView(APIView):
 
             # Price comes from VTpass, never from the client; a client amount only confirms the price shown.
             try:
-                amt = _data_plan_price(network, plan)
+                priced = _data_plan(network, plan)
             except PlanPricingUnavailable:
                 return Response(
-                    {"error": "Unable to price this data plan right now. Please try again."},
+                    {
+                        "error": "Unable to price this data plan right now. Please try again.",
+                        "code": "plans_unavailable",
+                    },
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
-            if amt is None:
+            if priced is None:
                 return Response(
-                    {"error": f"Unknown data plan '{plan}' for {network}."}, status=status.HTTP_400_BAD_REQUEST
+                    {"error": f"Unknown data plan '{plan}' for {network}.", "code": "unknown_plan"},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
+            amt, plan_name = priced
             if requested_amt is not None and Decimal(str(requested_amt)) != amt:
                 return Response(
-                    {"error": "Amount does not match the current price for this plan.", "price": str(amt)},
+                    {
+                        "error": "Amount does not match the current price for this plan.",
+                        "code": "price_changed",
+                        "price": str(amt),
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -552,7 +570,10 @@ class DataPurchaseView(APIView):
                 try:
                     wallet_services.hold(user, amt, ledger_reference("data", client_ref))
                 except wallet_services.InsufficientFunds:
-                    return Response({"error": "Insufficient funds."}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response(
+                        {"error": "Insufficient funds.", "code": "insufficient_funds"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
                 txn = DataTransaction.objects.create(
                     user=user,
@@ -560,6 +581,7 @@ class DataPurchaseView(APIView):
                     network=network,
                     phone=phone,
                     plan=plan,
+                    plan_name=plan_name[:120],
                     status="pending",
                     client_reference=client_ref,
                     provider_request_id=generate_request_id(),  # the ID VTpass knows it by (requery, callbacks)
@@ -677,7 +699,7 @@ class DataPlansView(APIView):
                 ]
             except PlanPricingUnavailable:
                 return Response(
-                    {"detail": "Data plans are unavailable right now. Please try again."},
+                    {"detail": "Data plans are unavailable right now. Please try again.", "code": "plans_unavailable"},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             try:
@@ -721,3 +743,82 @@ class VTPassCallbackView(APIView):
                 except Exception:
                     logger.exception("VTpass callback: requery failed for request %s", request_id)
         return Response({"response": "success"})
+
+
+# ===================== Receipts =====================
+def _user_purchase(user, client_reference):
+    return (
+        AirtimeTransaction.objects.filter(user=user, client_reference=client_reference).first()
+        or DataTransaction.objects.filter(user=user, client_reference=client_reference).first()
+    )
+
+
+@extend_schema(
+    description="A receipt for one of the user's purchases.", responses={200: OpenApiTypes.OBJECT, 404: DetailSchema}
+)
+class ReceiptView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, client_reference: str):
+        txn = _user_purchase(request.user, client_reference)
+        if txn is None:
+            return Response({"detail": "Purchase not found."}, status=status.HTTP_404_NOT_FOUND)
+        is_data = isinstance(txn, DataTransaction)
+        return Response(
+            {
+                "reference": txn.client_reference,
+                "date": txn.timestamp,
+                "item": txn.item if is_data else "Airtime",
+                "network": txn.network,
+                "phone": txn.phone,
+                "amount": str(txn.amount),
+                "status": txn.status,
+                "vtpass_request_id": txn.provider_request_id,
+                "vtpass_transaction_id": txn.provider_reference,
+            }
+        )
+
+
+# ===================== Saved numbers & network detection =====================
+@extend_schema(description="The user's saved numbers (GET) or save one (POST {name, phone, network}).")
+class BeneficiaryListView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = BeneficiarySerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # building the API docs: there's no user
+            return Beneficiary.objects.none()
+        return Beneficiary.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+@extend_schema(description="Remove a saved number.")
+class BeneficiaryDetailView(generics.DestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = BeneficiarySerializer
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return Beneficiary.objects.none()
+        return Beneficiary.objects.filter(user=self.request.user)
+
+
+@extend_schema(
+    description="Guess a number's network from its prefix. Numbers can be ported, so let the user change it.",
+    parameters=[OpenApiParameter(name="phone", required=True, type=str)],
+    responses={200: OpenApiTypes.OBJECT},
+)
+class DetectNetworkView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        phone = normalize_ng_phone(request.query_params.get("phone", ""))
+        if not phone:
+            return Response(
+                {"phone": ["Enter a Nigerian number like 0703xxxxxxx or +234703xxxxxxx."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"phone": phone, "network": detect_network(phone)})

@@ -35,6 +35,7 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     # Set when the user enters a code we emailed them. Needed before topping up.
     email_verified_at = models.DateTimeField(null=True, blank=True)
+    phone = models.CharField(max_length=15, blank=True)  # the user's own number, normalised (0803...)
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []

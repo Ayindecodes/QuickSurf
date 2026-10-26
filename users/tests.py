@@ -319,3 +319,81 @@ class TransactionPinTests(AuthTestCase):
         self.assertNotIn("pin", logged.request_payload)
         self.assertEqual(logged.request_payload["phone"], "080***4567")
         self.assertEqual(logged.response_payload["provider"]["content"]["transactions"]["phone"], "080***4567")
+
+
+class ProfileTests(AuthTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user(email="me@example.com", password=STRONG, first_name="Ada")
+        self.client.force_authenticate(self.user)
+        self.url = reverse("user-me")
+
+    def test_get_and_patch_profile_normalises_the_phone_and_ignores_the_email(self):
+        response = self.client.patch(
+            self.url, {"last_name": "Obi", "phone": "+2348031234567", "email": "new@example.com"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["phone"], "08031234567")
+        self.assertEqual(response.data["email"], "me@example.com")
+        self.assertFalse(response.data["has_pin"])
+        self.assertEqual(self.client.get(self.url).data["last_name"], "Obi")
+
+    def test_patch_rejects_a_number_that_is_not_nigerian(self):
+        response = self.client.patch(self.url, {"phone": "12345"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone", response.data)
+
+    def test_change_password_signs_out_other_devices_and_returns_new_tokens(self):
+        old_refresh = self._login("me@example.com").data["refresh"]
+        url = reverse("user-change-password")
+
+        wrong = self.client.post(
+            url, {"current_password": "nope", "new_password": "Brand-New-Lantern-7"}, format="json"
+        )
+        weak = self.client.post(url, {"current_password": STRONG, "new_password": "123"}, format="json")
+        changed = self.client.post(
+            url, {"current_password": STRONG, "new_password": "Brand-New-Lantern-7"}, format="json"
+        )
+
+        self.assertEqual(wrong.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(weak.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(changed.status_code, status.HTTP_200_OK)
+        self.assertIn("refresh", changed.data)
+        refresh = reverse("token_refresh")
+        self.assertEqual(self.client.post(refresh, {"refresh": old_refresh}, format="json").status_code, 401)
+        self.assertEqual(
+            self.client.post(refresh, {"refresh": changed.data["refresh"]}, format="json").status_code, 200
+        )
+        self.assertEqual(self._login("me@example.com", "Brand-New-Lantern-7").status_code, status.HTTP_200_OK)
+
+    def test_closing_an_account_is_refused_while_the_wallet_holds_money(self):
+        wallet_services.credit_topup(self.user, Decimal("50.00"), "PAY-CLOSE")
+
+        response = self.client.delete(self.url, {"password": STRONG}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "account_not_empty")
+        self.assertTrue(User.objects.get(pk=self.user.pk).is_active)
+
+    def test_closing_an_account_anonymises_it_and_keeps_the_ledger(self):
+        wallet_services.credit_topup(self.user, Decimal("50.00"), "PAY-CLOSE")
+        wallet_services.adjust(self.user, Decimal("-50.00"), "Refunded to bank on request")
+        set_pin(self.user, "2580")
+        refresh = self._login("me@example.com").data["refresh"]
+
+        wrong = self.client.delete(self.url, {"password": "nope"}, format="json")
+        closed = self.client.delete(self.url, {"password": STRONG}, format="json")
+
+        self.assertEqual(wrong.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(closed.status_code, status.HTTP_204_NO_CONTENT)
+        user = User.objects.get(pk=self.user.pk)
+        self.assertFalse(user.is_active)
+        self.assertEqual((user.email, user.first_name, user.phone), (f"closed-{user.pk}@closed.invalid", "", ""))
+        self.assertFalse(TransactionPin.objects.filter(user=user).exists())
+        self.assertEqual(Wallet.objects.get(user=user).transactions.count(), 2)
+        self.assertEqual(self._login("me@example.com").status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            self.client.post(reverse("token_refresh"), {"refresh": refresh}, format="json").status_code, 401
+        )
