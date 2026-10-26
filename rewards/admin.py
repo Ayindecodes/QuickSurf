@@ -1,5 +1,7 @@
 from django.contrib import admin
+
 from .models import LoyaltyLedger
+
 
 @admin.register(LoyaltyLedger)
 class LoyaltyLedgerAdmin(admin.ModelAdmin):

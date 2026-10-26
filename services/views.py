@@ -1,44 +1,41 @@
 # services/views.py
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-import json
 import logging
 import uuid
+from datetime import timedelta
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Dict
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q, Sum
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from django.core.cache import cache
-from django.utils import timezone
-from datetime import timedelta
-
-from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.response import Response
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
-from rest_framework import serializers as drf_serializers
-
-from drf_spectacular.utils import extend_schema, inline_serializer
-from drf_spectacular.types import OpenApiTypes
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from core.privacy import mask_pii
 from core.throttling import PurchaseRateThrottle, SafeAnonRateThrottle, SafeUserRateThrottle
 from users.security import PinError, check_pin
 from wallets import services as wallet_services
 from wallets.models import Wallet
-from .models import AirtimeTransaction, DataTransaction, ProviderLog
-from .settlement import FINAL_STATUSES, ledger_reference, purchase_kind, settle_purchase
-from .serializers import (
-    AirtimeTransactionSerializer,
-    DataTransactionSerializer,
-    AirtimePurchaseRequestSerializer,
-    DataPurchaseRequestSerializer,
-)
 
+from .models import AirtimeTransaction, DataTransaction, ProviderLog
+from .serializers import (
+    AirtimePurchaseRequestSerializer,
+    AirtimeTransactionSerializer,
+    DataPurchaseRequestSerializer,
+    DataTransactionSerializer,
+)
+from .settlement import FINAL_STATUSES, ledger_reference, purchase_kind, settle_purchase
 from .vtpass import (
     DATA_SERVICE_IDS,
     extract_variations,
@@ -48,8 +45,9 @@ from .vtpass import (
     strict_map_outcome,
     transaction_id,
 )
+
 try:
-    from .vtpass import requery_status, get_service_variations
+    from .vtpass import get_service_variations, requery_status
 except ImportError:
     requery_status = None
     get_service_variations = None
@@ -65,54 +63,14 @@ class SafePaginator(PageNumberPagination):
     max_page_size = 100
 
 
-def _to_plain_dict(maybe_mapping: Any) -> Dict:
-    if isinstance(maybe_mapping, dict):
-        return maybe_mapping
-    if hasattr(maybe_mapping, "items"):
-        return {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in maybe_mapping.items()}
-    if isinstance(maybe_mapping, (bytes, bytearray)):
-        try:
-            return json.loads(maybe_mapping.decode("utf-8"))
-        except Exception:
-            return {}
-    if isinstance(maybe_mapping, str):
-        try:
-            return json.loads(maybe_mapping)
-        except Exception:
-            return {}
-    return {}
+def _to_plain_dict(data: Any) -> Dict:
+    """request.data as a dict (JSON bodies and form posts are both dicts; anything else is empty)."""
+    return data if isinstance(data, dict) else {}
 
 
-def _to_plain_json(maybe_json: Any) -> Dict:
-    if isinstance(maybe_json, dict):
-        return maybe_json
-    try:
-        import requests  # type: ignore
-        if isinstance(maybe_json, requests.Response):  # pragma: no cover
-            try:
-                return maybe_json.json()
-            except Exception:
-                return {"raw": maybe_json.text, "http_status": maybe_json.status_code}
-    except Exception:
-        pass
-    if hasattr(maybe_json, "json") and callable(getattr(maybe_json, "json")):
-        try:
-            return maybe_json.json()
-        except Exception:
-            txt = getattr(maybe_json, "text", None)
-            code = getattr(maybe_json, "status_code", None)
-            return {"raw": txt or str(maybe_json), "http_status": code or "unknown"}
-    if isinstance(maybe_json, (bytes, bytearray)):
-        try:
-            return json.loads(maybe_json.decode("utf-8"))
-        except Exception:
-            return {"raw": maybe_json.decode("utf-8", errors="ignore")}
-    if isinstance(maybe_json, str):
-        try:
-            return json.loads(maybe_json)
-        except Exception:
-            return {"raw": maybe_json}
-    return {"raw": str(maybe_json)}
+def _to_plain_json(provider_result: Any) -> Dict:
+    """The VTpass client's result as a dict (it always returns one; anything else is kept as text)."""
+    return provider_result if isinstance(provider_result, dict) else {"raw": str(provider_result)}
 
 
 def _provider_http_status(maybe_resp: Any) -> int:
@@ -176,7 +134,14 @@ def _provider_status_code(provider_body: Dict, http_status: int | None = None) -
     return str(provider_body.get("http_status", "unknown"))
 
 
-def _log_provider(user, service_type: str, client_reference: str, request_payload: Dict, response_payload: Dict, http_status: int | None = None):
+def _log_provider(
+    user,
+    service_type: str,
+    client_reference: str,
+    request_payload: Dict,
+    response_payload: Dict,
+    http_status: int | None = None,
+):
     try:
         ProviderLog.objects.create(
             user=user,
@@ -194,8 +159,10 @@ def _log_provider(user, service_type: str, client_reference: str, request_payloa
 LOCK_TTL = 60  # seconds
 COOLDOWN_SEC = 45  # short window to block same (user+phone+network)
 
+
 def _lock_key_ref(user_id, service, client_ref):
     return f"lock:{service}:ref:{user_id}:{client_ref}"
+
 
 def _lock_key_line(user_id, service, network, phone):
     return f"lock:{service}:line:{user_id}:{network}:{phone}"
@@ -340,7 +307,8 @@ def _refresh_from_vtpass(txn):
     provider = _unwrap_provider(wrap)
     _log_provider(txn.user, "vtpass", txn.client_reference, {"action": "requery", "request_id": request_id}, wrap)
     return settle_purchase(
-        txn, strict_map_outcome(provider),
+        txn,
+        strict_map_outcome(provider),
         provider_status=str(provider.get("response_description", ""))[:64],
         provider_reference=transaction_id(provider) or txn.provider_reference,
     )
@@ -364,7 +332,7 @@ DetailSchema = inline_serializer(
 @extend_schema(
     description="Purchase airtime via VTpass (sandbox/live) with strict single-flight + idempotency.",
     request=AirtimePurchaseRequestSerializer,
-    responses={201: AirtimeTransactionSerializer, 200: AirtimeTransactionSerializer}
+    responses={201: AirtimeTransactionSerializer, 200: AirtimeTransactionSerializer},
 )
 class AirtimePurchaseView(APIView):
     permission_classes = [IsAuthenticated]
@@ -398,7 +366,10 @@ class AirtimePurchaseView(APIView):
         k_ref = _lock_key_ref(user.id, "airtime", client_ref)
         k_line = _lock_key_line(user.id, "airtime", network, phone)
         if not _acquire_purchase_locks(k_ref, k_line):
-            return Response({"detail": "Another purchase is in progress for this reference/line."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response(
+                {"detail": "Another purchase is in progress for this reference/line."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
 
         try:
             # True idempotency: if this reference exists, return it
@@ -410,9 +381,13 @@ class AirtimePurchaseView(APIView):
 
             # Also avoid parallel different refs on the same line by returning the most recent pending
             cooloff_after = timezone.now() - timedelta(seconds=COOLDOWN_SEC)
-            line_pending = AirtimeTransaction.objects.filter(
-                user=user, phone=phone, network=network, status="pending", timestamp__gte=cooloff_after
-            ).order_by("-timestamp").first()
+            line_pending = (
+                AirtimeTransaction.objects.filter(
+                    user=user, phone=phone, network=network, status="pending", timestamp__gte=cooloff_after
+                )
+                .order_by("-timestamp")
+                .first()
+            )
             if line_pending:
                 return Response(AirtimeTransactionSerializer(line_pending).data, status=status.HTTP_200_OK)
 
@@ -438,7 +413,7 @@ class AirtimePurchaseView(APIView):
                     amount=amt,
                     network=network,
                     phone=phone,
-                    status="pending",   # use only defined choices
+                    status="pending",  # use only defined choices
                     client_reference=client_ref,
                     provider_request_id=generate_request_id(),  # the ID VTpass knows it by (requery, callbacks)
                 )
@@ -452,7 +427,8 @@ class AirtimePurchaseView(APIView):
 
             # Settle: capture on success, release (refund) on failure, keep held while unknown
             txn = settle_purchase(
-                txn, strict_map_outcome(provider),
+                txn,
+                strict_map_outcome(provider),
                 provider_status=str(provider.get("response_description", ""))[:64],
                 provider_reference=transaction_id(provider),
                 raw_response=provider,
@@ -475,7 +451,9 @@ class AirtimePurchaseView(APIView):
                         txn.save(update_fields=["provider_status", "updated"])
             except Exception:
                 pass
-            return Response({"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY
+            )
         finally:
             _release_purchase_locks(k_ref, k_line)
 
@@ -484,7 +462,7 @@ class AirtimePurchaseView(APIView):
 @extend_schema(
     description="Purchase data via VTpass (sandbox/live) with strict single-flight + idempotency.",
     request=DataPurchaseRequestSerializer,
-    responses={201: DataTransactionSerializer, 200: DataTransactionSerializer}
+    responses={201: DataTransactionSerializer, 200: DataTransactionSerializer},
 )
 class DataPurchaseView(APIView):
     permission_classes = [IsAuthenticated]
@@ -518,7 +496,10 @@ class DataPurchaseView(APIView):
         k_ref = _lock_key_ref(user.id, "data", client_ref)
         k_line = _lock_key_line(user.id, "data", network, phone)
         if not _acquire_purchase_locks(k_ref, k_line):
-            return Response({"detail": "Another purchase is in progress for this reference/line."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response(
+                {"detail": "Another purchase is in progress for this reference/line."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
 
         try:
             existing = DataTransaction.objects.filter(user=user, client_reference=client_ref).first()
@@ -528,9 +509,13 @@ class DataPurchaseView(APIView):
                 return _reference_taken_response()
 
             cooloff_after = timezone.now() - timedelta(seconds=COOLDOWN_SEC)
-            line_pending = DataTransaction.objects.filter(
-                user=user, phone=phone, network=network, status="pending", timestamp__gte=cooloff_after
-            ).order_by("-timestamp").first()
+            line_pending = (
+                DataTransaction.objects.filter(
+                    user=user, phone=phone, network=network, status="pending", timestamp__gte=cooloff_after
+                )
+                .order_by("-timestamp")
+                .first()
+            )
             if line_pending:
                 return Response(DataTransactionSerializer(line_pending).data, status=status.HTTP_200_OK)
 
@@ -543,7 +528,9 @@ class DataPurchaseView(APIView):
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             if amt is None:
-                return Response({"error": f"Unknown data plan '{plan}' for {network}."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"error": f"Unknown data plan '{plan}' for {network}."}, status=status.HTTP_400_BAD_REQUEST
+                )
             if requested_amt is not None and Decimal(str(requested_amt)) != amt:
                 return Response(
                     {"error": "Amount does not match the current price for this plan.", "price": str(amt)},
@@ -583,7 +570,8 @@ class DataPurchaseView(APIView):
             _log_provider(user, "data", client_ref, payload, wrap, http_status=http_status)
 
             txn = settle_purchase(
-                txn, strict_map_outcome(provider),
+                txn,
+                strict_map_outcome(provider),
                 provider_status=str(provider.get("response_description", ""))[:64],
                 provider_reference=transaction_id(provider),
                 raw_response=provider,
@@ -604,7 +592,9 @@ class DataPurchaseView(APIView):
                         txn.save(update_fields=["provider_status", "updated"])
             except Exception:
                 pass
-            return Response({"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"error": PURCHASE_ERROR, "client_reference": client_ref}, status=status.HTTP_502_BAD_GATEWAY
+            )
         finally:
             _release_purchase_locks(k_ref, k_line)
 
@@ -621,12 +611,16 @@ class PurchaseStatusView(APIView):
         if requery_status is None:
             return Response({"detail": "Requery not available."}, status=501)
 
-        txn = (AirtimeTransaction.objects.filter(user=request.user, client_reference=client_reference).first() or
-               DataTransaction.objects.filter(user=request.user, client_reference=client_reference).first())
+        txn = (
+            AirtimeTransaction.objects.filter(user=request.user, client_reference=client_reference).first()
+            or DataTransaction.objects.filter(user=request.user, client_reference=client_reference).first()
+        )
         if not txn:
             return Response({"detail": "Transaction not found."}, status=404)
 
-        serializer_cls = AirtimeTransactionSerializer if isinstance(txn, AirtimeTransaction) else DataTransactionSerializer
+        serializer_cls = (
+            AirtimeTransactionSerializer if isinstance(txn, AirtimeTransaction) else DataTransactionSerializer
+        )
         if txn.status in FINAL_STATUSES or not _requery_allowed(txn):
             return Response(serializer_cls(txn).data)
 
@@ -679,8 +673,10 @@ class DataPlansView(APIView):
                     for plan in _vtpass_plans(network)
                 ]
             except PlanPricingUnavailable:
-                return Response({"detail": "Data plans are unavailable right now. Please try again."},
-                                status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                return Response(
+                    {"detail": "Data plans are unavailable right now. Please try again."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             try:
                 cache.set(cache_key, plans, PLANS_CACHE_SEC)
             except Exception:
@@ -690,8 +686,10 @@ class DataPlansView(APIView):
 
 # ===================== VTpass callback =====================
 def _purchase_by_request_id(request_id: str):
-    return (AirtimeTransaction.objects.filter(provider_request_id=request_id).first()
-            or DataTransaction.objects.filter(provider_request_id=request_id).first())
+    return (
+        AirtimeTransaction.objects.filter(provider_request_id=request_id).first()
+        or DataTransaction.objects.filter(provider_request_id=request_id).first()
+    )
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -702,6 +700,7 @@ class VTPassCallbackView(APIView):
     asked directly (requery) before any money moves. Always acknowledged, because VTpass retries
     until it gets {"response": "success"}.
     """
+
     permission_classes = [AllowAny]
     authentication_classes = []
     throttle_classes = []

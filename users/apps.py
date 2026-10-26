@@ -1,9 +1,7 @@
 from django.apps import AppConfig
 
-class UsersConfig(AppConfig):
-    default_auto_field = 'django.db.models.BigAutoField'
-    name = 'users'
 
-    def ready(self):
-        # Import signal handlers to register them
-        import users.models
+class UsersConfig(AppConfig):
+    # Signal handlers live in users/models.py, which Django imports when the app loads.
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "users"

@@ -1,19 +1,19 @@
 # wallets/views.py
-from rest_framework.views import APIView
-from rest_framework.permissions import BasePermission, IsAuthenticated
-from rest_framework.response import Response
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter
+from services.models import AirtimeTransaction, DataTransaction
 
 from . import services as wallet_services
 from .models import Wallet
-from services.models import AirtimeTransaction, DataTransaction
 from .serializers import (
-    WalletBalanceSerializer,
-    TransactionSerializer,
     AdjustmentSerializer,
+    TransactionSerializer,
+    WalletBalanceSerializer,
 )
 
 
@@ -44,7 +44,10 @@ class WalletBalanceView(APIView):
 @extend_schema(
     description="Balance + last 10 airtime/data purchases for the authenticated user.",
     request=None,
-    responses={200: OpenApiResponse(description="Summary payload"), 404: OpenApiResponse(description="Wallet not found.")},
+    responses={
+        200: OpenApiResponse(description="Summary payload"),
+        404: OpenApiResponse(description="Wallet not found."),
+    },
 )
 class WalletSummaryView(APIView):
     permission_classes = [IsAuthenticated]
@@ -58,31 +61,40 @@ class WalletSummaryView(APIView):
         airtime = AirtimeTransaction.objects.filter(user=request.user).order_by("-timestamp")[:10]
         data = DataTransaction.objects.filter(user=request.user).order_by("-timestamp")[:10]
 
-        return Response({
-            "balance": str(wallet.balance),
-            "locked": str(wallet.locked),
-            "recent_airtime": [{
-                "amount": str(t.amount),
-                "network": t.network,
-                "phone": t.phone,
-                "status": t.status,
-                "client_reference": t.client_reference,
-                "provider_request_id": t.provider_request_id,
-                "provider_status": t.provider_status,
-                "timestamp": t.timestamp,
-            } for t in airtime],
-            "recent_data": [{
-                "amount": str(t.amount),
-                "network": t.network,
-                "phone": t.phone,
-                "plan": t.plan,
-                "status": t.status,
-                "client_reference": t.client_reference,
-                "provider_request_id": t.provider_request_id,
-                "provider_status": t.provider_status,
-                "timestamp": t.timestamp,
-            } for t in data],
-        }, status=status.HTTP_200_OK)
+        return Response(
+            {
+                "balance": str(wallet.balance),
+                "locked": str(wallet.locked),
+                "recent_airtime": [
+                    {
+                        "amount": str(t.amount),
+                        "network": t.network,
+                        "phone": t.phone,
+                        "status": t.status,
+                        "client_reference": t.client_reference,
+                        "provider_request_id": t.provider_request_id,
+                        "provider_status": t.provider_status,
+                        "timestamp": t.timestamp,
+                    }
+                    for t in airtime
+                ],
+                "recent_data": [
+                    {
+                        "amount": str(t.amount),
+                        "network": t.network,
+                        "phone": t.phone,
+                        "plan": t.plan,
+                        "status": t.status,
+                        "client_reference": t.client_reference,
+                        "provider_request_id": t.provider_request_id,
+                        "provider_status": t.provider_status,
+                        "timestamp": t.timestamp,
+                    }
+                    for t in data
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 @extend_schema(

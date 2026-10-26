@@ -5,19 +5,24 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
+from unittest import skipUnless
 from unittest.mock import patch
 
+import requests
 from django.conf import settings
 from django.core.management import call_command
+from django.db import connection
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase, APITransactionTestCase
 
 from payments.models import PaymentIntent
+from payments.paystack import initialize, kobo, verify
 from payments.services import credit_wallet_once
 from services.models import ProviderLog
 from users.models import User
@@ -41,8 +46,9 @@ def _charge_success(reference, amount_kobo, currency="NGN"):
 
 class PaymentTestCase(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(email="pay@example.com", password="StrongPass123",
-                                             email_verified_at=timezone.now())
+        self.user = User.objects.create_user(
+            email="pay@example.com", password="StrongPass123", email_verified_at=timezone.now()
+        )
         self.wallet = Wallet.objects.get(user=self.user)
         self.client.force_authenticate(self.user)
 
@@ -132,12 +138,16 @@ class PaymentFlowTests(PaymentTestCase):
         self.assertEqual(response.data["status"], "review")
         self.assertEqual(self._balance(), Decimal("0.00"))
 
-    @patch("payments.views.ps_verify", return_value=_verify_success(
-        "PAY-TRIM-1", 150000,
-        authorization={"authorization_code": "AUTH_secret", "last4": "4081", "reusable": True},
-        customer={"email": "pay@example.com", "phone": "08031234567"},
-        log={"history": []},
-    ))
+    @patch(
+        "payments.views.ps_verify",
+        return_value=_verify_success(
+            "PAY-TRIM-1",
+            150000,
+            authorization={"authorization_code": "AUTH_secret", "last4": "4081", "reusable": True},
+            customer={"email": "pay@example.com", "phone": "08031234567"},
+            log={"history": []},
+        ),
+    )
     def test_stored_paystack_payloads_drop_card_and_customer_details(self, _mock_verify):
         intent = self._intent("PAY-TRIM-1")
 
@@ -171,8 +181,13 @@ class PaymentFlowTests(PaymentTestCase):
         self.assertEqual(self._balance(), Decimal("1500.00"))
 
     @override_settings(PAYSTACK_CALLBACK_URL="https://app.example.com/payments/callback")
-    @patch("payments.views.ps_initialize", return_value=(
-        200, {"status": True, "data": {"authorization_url": "https://checkout.paystack.com/x", "access_code": "x"}}))
+    @patch(
+        "payments.views.ps_initialize",
+        return_value=(
+            200,
+            {"status": True, "data": {"authorization_url": "https://checkout.paystack.com/x", "access_code": "x"}},
+        ),
+    )
     def test_init_uses_a_random_reference_and_the_configured_callback(self, mock_initialize):
         first = self.client.post(reverse("payments_init"), {"amount": "500.00"}, format="json")
         second = self.client.post(reverse("payments_init"), {"amount": "500.00"}, format="json")
@@ -267,8 +282,9 @@ class PaystackWebhookSignatureTests(PaymentTestCase):
     def _post_signed(self, payload, key):
         body = json.dumps(payload).encode()
         signature = hmac.new(key.encode(), body, hashlib.sha512).hexdigest()
-        return self.client.post(reverse("payments_webhook"), body, content_type="application/json",
-                                HTTP_X_PAYSTACK_SIGNATURE=signature)
+        return self.client.post(
+            reverse("payments_webhook"), body, content_type="application/json", HTTP_X_PAYSTACK_SIGNATURE=signature
+        )
 
     @patch("payments.paystack.WEBHOOK_SECRET", "")
     def test_webhook_is_rejected_when_no_secret_is_configured(self):
@@ -307,13 +323,16 @@ class VerifyPendingTopupsTests(PaymentTestCase):
             stale.reference: (200, {"status": True, "data": {"status": "ongoing", "reference": stale.reference}}),
         }
 
-        with patch("payments.management.commands.verify_pending_topups.ps_verify",
-                   side_effect=lambda reference: answers[reference]) as mock_verify:
+        with patch(
+            "payments.management.commands.verify_pending_topups.ps_verify",
+            side_effect=lambda reference: answers[reference],
+        ) as mock_verify:
             call_command("verify_pending_topups", stdout=io.StringIO())
 
         statuses = dict(PaymentIntent.objects.values_list("reference", "status"))
-        self.assertEqual(statuses, {paid.reference: "success", stale.reference: "abandoned",
-                                    recent.reference: "pending"})
+        self.assertEqual(
+            statuses, {paid.reference: "success", stale.reference: "abandoned", recent.reference: "pending"}
+        )
         self.assertEqual(self._balance(), Decimal("1500.00"))
         self.assertEqual(mock_verify.call_count, 2)
 
@@ -338,10 +357,21 @@ class PaymentIntentAdminTests(PaymentTestCase):
 
 class ProductionPaystackKeyTests(SimpleTestCase):
     def _boot(self, paystack_key):
-        env = {**os.environ, "ENV": "production", "SECRET_KEY": "x" * 50, "PAYSTACK_SECRET_KEY": paystack_key,
-               "DATABASE_URL": "postgres://u:p@db.example.com:5432/quicksurf", "PROVIDER_MODE": "SANDBOX"}
-        return subprocess.run([sys.executable, "-c", "import quicksurf.settings"], cwd=settings.BASE_DIR,
-                              env=env, capture_output=True, text=True)
+        env = {
+            **os.environ,
+            "ENV": "production",
+            "SECRET_KEY": "x" * 50,
+            "PAYSTACK_SECRET_KEY": paystack_key,
+            "DATABASE_URL": "postgres://u:p@db.example.com:5432/quicksurf",
+            "PROVIDER_MODE": "SANDBOX",
+        }
+        return subprocess.run(
+            [sys.executable, "-c", "import quicksurf.settings"],
+            cwd=settings.BASE_DIR,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
 
     def test_production_refuses_to_start_with_a_test_paystack_key(self):
         result = self._boot("sk_test_123")
@@ -353,3 +383,83 @@ class ProductionPaystackKeyTests(SimpleTestCase):
         result = self._boot("sk_live_123")
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+def _paystack_http(status_code, body=None, text=""):
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = (json.dumps(body) if body is not None else text).encode()
+    response.headers["Content-Type"] = "application/json; charset=utf-8" if body is not None else "text/html"
+    return response
+
+
+class PaystackClientTests(SimpleTestCase):
+    def test_amounts_are_sent_in_kobo(self):
+        self.assertEqual(kobo(Decimal("1500")), 150000)
+        self.assertEqual(kobo(Decimal("0.01")), 1)
+        self.assertEqual(kobo(Decimal("99.995")), 10000)  # rounds half up to the nearest kobo
+
+    def test_initialize_sends_the_amount_reference_and_callback_with_the_secret_key(self):
+        reply = _paystack_http(200, {"status": True, "data": {"authorization_url": "https://checkout.paystack.com/x"}})
+
+        with (
+            patch("payments.paystack.requests.post", return_value=reply) as post,
+            patch("payments.paystack.SECRET", "sk_test_dummy"),
+        ):
+            code, body = initialize(
+                "ade@example.com", Decimal("500.00"), "QS-1", callback_url="https://app.example.com/cb"
+            )
+
+        sent = post.call_args.kwargs
+        self.assertEqual(
+            sent["json"],
+            {
+                "email": "ade@example.com",
+                "amount": 50000,
+                "reference": "QS-1",
+                "callback_url": "https://app.example.com/cb",
+            },
+        )
+        self.assertEqual(sent["headers"]["Authorization"], "Bearer sk_test_dummy")
+        self.assertEqual((code, body["status"]), (200, True))
+
+    def test_verify_handles_a_non_json_error_page(self):
+        with patch("payments.paystack.requests.get", return_value=_paystack_http(502, text="<html>Bad gateway</html>")):
+            code, body = verify("QS-1")
+
+        self.assertEqual(code, 502)
+        self.assertEqual(body, {"raw": "<html>Bad gateway</html>", "http_status": 502})
+
+
+@skipUnless(connection.vendor == "postgresql", "needs real row locks (Postgres)")
+class ConcurrentCreditTests(APITransactionTestCase):
+    def test_verify_and_webhook_racing_each_other_credit_once(self):
+        user = User.objects.create_user(
+            email="race-pay@example.com", password="StrongPass123", email_verified_at=timezone.now()
+        )
+        intent = PaymentIntent.objects.create(
+            user=user, amount=Decimal("1500.00"), reference="PAY-RACE-2", status="pending"
+        )
+
+        def call(i):
+            client = APIClient()
+            try:
+                if i % 2:
+                    client.force_authenticate(user)
+                    return client.get(reverse("payments_verify", args=[intent.reference])).status_code
+                return client.post(
+                    reverse("payments_webhook"), _charge_success(intent.reference, 150000), format="json"
+                ).status_code
+            finally:
+                connection.close()
+
+        with (
+            patch("payments.views.ps_verify", return_value=_verify_success(intent.reference, 150000)),
+            patch("payments.views.valid_webhook", return_value=True),
+        ):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                codes = list(pool.map(call, range(8)))
+
+        self.assertEqual(set(codes), {200})
+        self.assertEqual(Wallet.objects.get(user=user).balance, Decimal("1500.00"))
+        self.assertEqual(Transaction.objects.filter(type="topup", reference="PAY-RACE-2").count(), 1)

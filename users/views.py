@@ -1,22 +1,19 @@
 # users/views.py
 import hashlib
 
-from django.contrib.auth import get_user_model, authenticate
+from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
-
+from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-
-from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 from core.models import LoginActivity
 from core.net import client_ip
@@ -48,8 +45,12 @@ RESET = OneTimeCode.PURPOSE_RESET_PASSWORD
 # ---------------------------
 def _stored_email(email) -> str | None:
     """The stored email of the account matching case-insensitively (older accounts kept their case)."""
-    return (User.objects.filter(email__iexact=str(email or "").strip())
-            .order_by("id").values_list("email", flat=True).first())
+    return (
+        User.objects.filter(email__iexact=str(email or "").strip())
+        .order_by("id")
+        .values_list("email", flat=True)
+        .first()
+    )
 
 
 def _device_fingerprint(request) -> str:
@@ -96,7 +97,7 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 @extend_schema(
     description="Obtain JWT access/refresh tokens (logs IP, user agent, and device fingerprint). "
-                "Optionally send `X-Device-Id` header for a stable device identifier.",
+    "Optionally send `X-Device-Id` header for a stable device identifier.",
     request=LoginRequestSchema,
     responses={
         200: TokenPairSchema,
@@ -108,6 +109,7 @@ class LoggingTokenObtainPairView(TokenObtainPairView):
     """
     Use this in urls.py at /api/token/ to replace the default.
     """
+
     serializer_class = EmailTokenObtainPairSerializer
     throttle_classes = [*SCOPED_THROTTLES, LoginEmailRateThrottle]
     throttle_scope = "login"
@@ -127,7 +129,7 @@ class LoggingTokenObtainPairView(TokenObtainPairView):
 # ---------------------------
 @extend_schema(
     description="Register a new user and return JWT tokens. A 6-digit code is emailed to verify the address; "
-                "it must be verified before the first top-up.",
+    "it must be verified before the first top-up.",
     request=UserSerializer,
     responses={
         201: TokenPairSchema,
@@ -186,7 +188,7 @@ class LoginView(APIView):
 
 @extend_schema(
     description="Sign out: revoke the given refresh token, or every one of the user's refresh tokens with "
-                "`everywhere: true`. Access tokens stop working when they expire.",
+    "`everywhere: true`. Access tokens stop working when they expire.",
     request=LogoutSerializer,
     responses={200: OpenApiResponse(description="Signed out"), 400: OpenApiResponse(description="Bad token")},
 )
@@ -202,8 +204,9 @@ class LogoutView(APIView):
 
         raw = serializer.validated_data.get("refresh")
         if not raw:
-            return Response({"refresh": ["This field is required unless everywhere is true."]},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"refresh": ["This field is required unless everywhere is true."]}, status=status.HTTP_400_BAD_REQUEST
+            )
         try:
             token = RefreshToken(raw)
             if str(token.get("user_id")) != str(request.user.pk):
@@ -217,8 +220,11 @@ class LogoutView(APIView):
 # ---------------------------
 # Email verification & password reset (6-digit codes by email)
 # ---------------------------
-@extend_schema(description="Email the user a new 6-digit verification code (at most one a minute).",
-               request=None, responses={200: OpenApiResponse(description="Sent")})
+@extend_schema(
+    description="Email the user a new 6-digit verification code (at most one a minute).",
+    request=None,
+    responses={200: OpenApiResponse(description="Sent")},
+)
 class VerifyEmailRequestView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = SCOPED_THROTTLES
@@ -230,16 +236,23 @@ class VerifyEmailRequestView(APIView):
             return Response({"detail": "Your email is already verified."})
         code = issue_code(user, VERIFY)
         if code is None:
-            return Response({"detail": "A code was sent less than a minute ago. Please wait before asking again."},
-                            status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response(
+                {"detail": "A code was sent less than a minute ago. Please wait before asking again."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
         if not send_code(user, VERIFY, code):
-            return Response({"detail": "We couldn't send the email. Please try again shortly."},
-                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response(
+                {"detail": "We couldn't send the email. Please try again shortly."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response({"detail": f"We sent a code to {user.email}."})
 
 
-@extend_schema(description="Confirm the email with the 6-digit code.", request=CodeSerializer,
-               responses={200: OpenApiResponse(description="Verified"), 400: OpenApiResponse(description="Bad code")})
+@extend_schema(
+    description="Confirm the email with the 6-digit code.",
+    request=CodeSerializer,
+    responses={200: OpenApiResponse(description="Verified"), 400: OpenApiResponse(description="Bad code")},
+)
 class VerifyEmailConfirmView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_classes = SCOPED_THROTTLES
@@ -256,9 +269,11 @@ class VerifyEmailConfirmView(APIView):
         return Response({"detail": "Email verified.", "email_verified": True})
 
 
-@extend_schema(description="Email a 6-digit password reset code. Always succeeds, so it can't reveal "
-                           "which emails have accounts.",
-               request=PasswordResetRequestSerializer, responses={200: OpenApiResponse(description="Requested")})
+@extend_schema(
+    description="Email a 6-digit password reset code. Always succeeds, so it can't reveal which emails have accounts.",
+    request=PasswordResetRequestSerializer,
+    responses={200: OpenApiResponse(description="Requested")},
+)
 class PasswordResetRequestView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = SCOPED_THROTTLES
@@ -276,9 +291,11 @@ class PasswordResetRequestView(APIView):
         return Response({"detail": "If that email has an account, we've sent a code to it."})
 
 
-@extend_schema(description="Set a new password with the emailed code. Signs the user out everywhere.",
-               request=PasswordResetConfirmSerializer,
-               responses={200: OpenApiResponse(description="Changed"), 400: OpenApiResponse(description="Bad code")})
+@extend_schema(
+    description="Set a new password with the emailed code. Signs the user out everywhere.",
+    request=PasswordResetConfirmSerializer,
+    responses={200: OpenApiResponse(description="Changed"), 400: OpenApiResponse(description="Bad code")},
+)
 class PasswordResetConfirmView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = SCOPED_THROTTLES
@@ -310,9 +327,12 @@ class PasswordResetConfirmView(APIView):
 # ---------------------------
 # Transaction PIN
 # ---------------------------
-@extend_schema(description="GET: whether a transaction PIN is set. POST {pin, password}: set or change it "
-                           "(4 digits, not repeated/sequential).",
-               request=PinSerializer, responses={200: OpenApiResponse(description="PIN status")})
+@extend_schema(
+    description="GET: whether a transaction PIN is set. POST {pin, password}: set or change it "
+    "(4 digits, not repeated/sequential).",
+    request=PinSerializer,
+    responses={200: OpenApiResponse(description="PIN status")},
+)
 class PinView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_scope = "pin_change"
@@ -323,7 +343,9 @@ class PinView(APIView):
 
     def get(self, request):
         record = TransactionPin.objects.filter(user=request.user).first()
-        locked_until = record.locked_until if record and record.locked_until and record.locked_until > timezone.now() else None
+        locked_until = (
+            record.locked_until if record and record.locked_until and record.locked_until > timezone.now() else None
+        )
         return Response({"has_pin": record is not None, "locked_until": locked_until})
 
     def post(self, request):

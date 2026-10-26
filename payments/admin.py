@@ -8,6 +8,7 @@ from .services import apply_verification, log_paystack, trim_payload
 @admin.register(PaymentIntent)
 class PaymentIntentAdmin(admin.ModelAdmin):
     """Read-only: intents change only through Paystack verify/webhooks (or the action below)."""
+
     list_display = ("reference", "user", "amount", "currency", "status", "created", "paid_at")
     list_filter = ("status", "created")
     search_fields = ("reference", "user__email")
