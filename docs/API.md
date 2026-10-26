@@ -43,18 +43,19 @@ Codes you will meet:
 | HTTP | `code` | Meaning |
 |---|---|---|
 | 400 | `invalid` | Field errors (see `fields`) |
-| 400 | `insufficient_funds`, `daily_limit` | The balance is too low; the daily purchase limit is reached |
+| 400 | `insufficient_funds`, `daily_limit` | The balance is too low; the daily purchase limit is reached (`level` says whether verifying the phone would raise it) |
+| 400 | `daily_topup_limit` | Today's top-up limit is reached; `remaining` says how much more is allowed today |
 | 400 | `price_changed`, `unknown_plan` | The data plan's price changed (the new one is in `price`); the plan no longer exists |
 | 400 | `redemption_refused`, `invalid_range` | See Rewards and History |
 | 401 | `not_authenticated`, `authentication_failed`, `token_not_valid` | Refresh the access token, or sign in again |
-| 403 | `email_unverified` | The email must be verified before the first top-up |
+| 403 | `email_unverified`, `phone_unverified` | The email (always) or phone (when the server requires it) must be verified before topping up |
 | 403 | `pin_not_set`, `pin_invalid`, `pin_locked` | See PIN |
 | 403 | `permission_denied` | Not allowed |
 | 404 | `not_found` | Unknown purchase, reference or plan |
-| 409 | `reference_in_use`, `account_not_empty` | The `client_reference` belongs to another purchase; the account still holds money |
+| 409 | `reference_in_use`, `account_not_empty`, `phone_taken` | The `client_reference` belongs to another purchase; the account still holds money; the phone number is verified on another account |
 | 429 | `throttled`, `purchase_in_progress` | Too many requests; a purchase for this number is already going through. Wait and retry |
 | 500 | `server_error` | Our fault. Show the `request_id` |
-| 502/503 | `provider_error`, `unavailable`, `plans_unavailable` | VTpass or Paystack trouble. Retry later |
+| 502/503 | `provider_error`, `unavailable`, `plans_unavailable`, `sms_failed` | VTpass, Paystack or SMS trouble. Retry later |
 | 503 | `purchases_paused`, `topups_paused` | Sales or top-ups are switched off for now |
 
 ## Accounts
@@ -67,7 +68,8 @@ Codes you will meet:
 | Sign out | `POST /api/v1/users/logout/ {refresh}`, or `{refresh, everywhere: true}` to sign out of all devices |
 | Verify email | `POST /api/v1/users/verify-email/request/`, then `…/verify-email/confirm/ {code}` |
 | Forgot password | `POST /api/v1/users/password-reset/request/ {email}`, then `…/confirm/ {email, code, new_password}` |
-| Profile | `GET /api/v1/users/me/`, `PATCH /api/v1/users/me/ {first_name, last_name, phone}` |
+| Profile | `GET /api/v1/users/me/`, `PATCH /api/v1/users/me/ {first_name, last_name}` |
+| Verify phone | `POST /api/v1/users/phone/request/ {phone}` texts a code, then `…/phone/confirm/ {code}` → the profile |
 | Change password | `POST /api/v1/users/me/password/ {current_password, new_password}` → new `{access, refresh}` |
 | Close account | `DELETE /api/v1/users/me/ {password}` → 204 |
 
@@ -85,7 +87,24 @@ How sign-in works:
   purchase is pending. Closing removes the user's personal details and keeps the transaction
   records.
 
-The profile's `email_verified` and `has_pin` tell you which setup steps are still to do.
+The profile's `email_verified`, `phone_verified` and `has_pin` tell you which setup steps are still to do.
+
+### Verification levels and limits
+
+| Level | Means | Daily limits |
+|---|---|---|
+| `basic` | Email confirmed | Lower: `BASIC_DAILY_PURCHASE_LIMIT`, `BASIC_DAILY_TOPUP_LIMIT` (₦10,000 by default) |
+| `verified` | Phone confirmed by SMS | The full limits |
+
+- **Changing the phone number:** it can only be set by confirming a texted code. A number can be
+  verified on one account only (`phone_taken`).
+- **What the profile shows:** its `limits` gives the level, today's limits, and how much is used:
+  `{level, daily_purchase_limit, daily_topup_limit, spent_today, topped_up_today}`.
+- **Flagged accounts:** an account the fraud checks flag (for example a card that has funded several
+  accounts) stays at `basic` until support reviews it.
+- **Device ID:** send a stable random device ID in an `X-Device-Id` header on sign-in and sign-up (keep
+  it in local storage). Accounts sharing one device are reviewed. The IP address alone is never used
+  for that.
 
 ## PIN
 
@@ -106,7 +125,10 @@ When the PIN is wrong:
 ## Topping up (Paystack)
 
 1. `POST /api/v1/payments/init/ {amount}` (at least ₦100) → `{reference, authorization_url, status}`.
-   This fails with `email_unverified` until the email is verified.
+   It fails with:
+   - `email_unverified` until the email is verified;
+   - `phone_unverified` if the server requires a verified phone;
+   - `daily_topup_limit` past the day's limit.
 2. Open `authorization_url` (Paystack checkout). Keep the `reference`.
 3. When the user comes back, call `GET /api/v1/payments/verify/<reference>/` →
    `{reference, status, credited?}`.
@@ -243,7 +265,8 @@ When a limit is hit you get a 429 with code `throttled`. Wait before retrying; D
 |---|---|
 | Login | 20 a minute per IP, and 10 an hour per email |
 | Sign-up | 20 an hour per IP |
-| Password reset, email codes, PIN changes, password changes | 10 an hour |
+| Password reset, email and phone codes, PIN changes, password changes | 10 an hour |
+| Texting a phone code | 5 an hour, and one a minute |
 | Reward redemptions | 10 an hour |
 | Top-ups | 20 an hour |
 | Purchases | 30 an hour |

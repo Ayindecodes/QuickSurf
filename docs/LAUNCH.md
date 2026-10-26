@@ -26,6 +26,11 @@ Tick each item off in the PR or a copy of this file.
 - [ ] Paystack business verification is complete, so live keys work and settlements reach the bank.
 - [ ] The VTpass live account is approved and funded.
 - [ ] The support inbox and WhatsApp number are working and monitored.
+- [ ] **Termii** account for phone verification:
+  - fund it;
+  - get the sender ID `QuickSurf` approved;
+  - copy the API key and base URL into the settings;
+  - send yourself a code from the app, then set `TOPUP_REQUIRES_PHONE=True`.
 
 ### Keys and accounts (You)
 - [ ] Rotate the VTpass and Paystack keys that were exposed in the repository's history

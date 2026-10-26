@@ -16,6 +16,7 @@ from rest_framework.views import APIView
 from core.alerts import BAD_WEBHOOK_SIGNATURES, count_event
 from core.net import client_ip
 from core.throttling import SafeAnonRateThrottle, SafeUserRateThrottle, TopupRateThrottle
+from users import limits
 
 from .models import PaymentIntent
 from .paystack import initialize as ps_initialize
@@ -27,6 +28,7 @@ from .services import (
     apply_verification,
     credit_wallet_once,
     log_paystack,
+    payer_fingerprint,
     payment_matches,
     set_status_unless_final,
     trim_payload,
@@ -92,10 +94,29 @@ class PaymentInitView(APIView):
                 {"detail": "Verify your email before topping up.", "code": "email_unverified"},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if settings.TOPUP_REQUIRES_PHONE and not request.user.phone_verified:
+            return Response(
+                {"detail": "Verify your phone number before topping up.", "code": "phone_unverified"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         ser = PaymentInitRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         amount = Decimal(str(ser.validated_data["amount"]))
+
+        daily = limits.daily_topup_limit(request.user)
+        if daily:
+            remaining = max(Decimal(daily) - limits.topped_up_today(request.user), Decimal("0"))
+            if amount > remaining:
+                return Response(
+                    {
+                        "error": f"You can top up ₦{remaining:,.2f} more today (daily limit ₦{daily:,}).",
+                        "code": "daily_topup_limit",
+                        "remaining": str(remaining),
+                        "level": limits.level(request.user),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         metadata = ser.validated_data.get("metadata") or {}
 
         # Random, so nobody can guess or pre-empt another user's reference
@@ -177,10 +198,10 @@ class PaymentVerifyView(APIView):
             return Response(
                 {"detail": "Payment verification unavailable. Please retry."}, status=status.HTTP_502_BAD_GATEWAY
             )
-        body = trim_payload(body)
-        log_paystack(request.user, reference, "/transaction/verify", None, body, code)
+        stored = trim_payload(body)  # what we keep: no card or customer details
+        log_paystack(request.user, reference, "/transaction/verify", None, stored, code)
 
-        intent.verify_response = body
+        intent.verify_response = stored
         intent.save(update_fields=["verify_response", "updated"])
 
         result, credited = apply_verification(intent, code, body)
@@ -239,7 +260,7 @@ class PaystackWebhookView(APIView):
         if event == "charge.success" and (data.get("status") == "success"):
             log_paystack(intent.user, reference, "webhook:charge.success", None, stored, 200)
             if payment_matches(intent, data):
-                credit_wallet_once(intent.user, intent.amount, intent.reference)
+                credit_wallet_once(intent.user, intent.amount, intent.reference, payer_fingerprint(data))
             else:
                 set_status_unless_final(intent, "review")
             return Response({"ok": True})
