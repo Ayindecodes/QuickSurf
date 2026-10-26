@@ -1,0 +1,39 @@
+# Local development: API on http://localhost:8000 with Postgres and Redis.
+#   cp .env.example .env
+#   docker compose up
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: quicksurf
+      POSTGRES_USER: quicksurf
+      POSTGRES_PASSWORD: quicksurf
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quicksurf -d quicksurf"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+
+  web:
+    build: .
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://quicksurf:quicksurf@db:5432/quicksurf
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  db-data:

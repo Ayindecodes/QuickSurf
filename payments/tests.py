@@ -337,7 +337,8 @@ class PaymentIntentAdminTests(PaymentTestCase):
 
 class ProductionPaystackKeyTests(SimpleTestCase):
     def _boot(self, paystack_key):
-        env = {**os.environ, "ENV": "production", "SECRET_KEY": "x" * 50, "PAYSTACK_SECRET_KEY": paystack_key}
+        env = {**os.environ, "ENV": "production", "SECRET_KEY": "x" * 50, "PAYSTACK_SECRET_KEY": paystack_key,
+               "DATABASE_URL": "postgres://u:p@db.example.com:5432/quicksurf", "PROVIDER_MODE": "SANDBOX"}
         return subprocess.run([sys.executable, "-c", "import quicksurf.settings"], cwd=settings.BASE_DIR,
                               env=env, capture_output=True, text=True)
 
