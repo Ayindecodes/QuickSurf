@@ -11,6 +11,7 @@ class PaymentIntent(models.Model):
         ("success", "Success"),
         ("failed", "Failed"),
         ("abandoned", "Abandoned"),
+        ("review", "Needs review"),  # paid, but not the amount/currency asked for: not credited
     ]
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="payment_intents")

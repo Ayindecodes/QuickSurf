@@ -1,8 +1,7 @@
 # payments/views.py
+import uuid
 from decimal import Decimal
 from django.conf import settings
-from django.db import transaction
-from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
@@ -12,48 +11,18 @@ from rest_framework import status
 from rest_framework import serializers as drf_serializers
 from drf_spectacular.utils import extend_schema, inline_serializer
 
-from wallets import services as wallet_services
-from services.models import ProviderLog
 from .models import PaymentIntent
 from .serializers import PaymentInitRequestSerializer
 from .paystack import initialize as ps_initialize, verify as ps_verify, valid_webhook
-
-# ---- helpers ----------------------------------------------------------------
-
-def _log_provider(user, client_reference, endpoint, req, resp, status_code, provider="paystack"):
-    try:
-        ProviderLog.objects.create(
-            user=user,
-            service_type="paystack",
-            client_reference=client_reference,
-            request_payload=req or {},
-            response_payload=resp or {},
-            status_code=str(status_code),
-            endpoint=endpoint,
-            provider=provider,
-        )
-    except Exception:
-        pass
-
-def _credit_wallet_once(user, amount: Decimal, reference: str):
-    """
-    Idempotent credit. If we've already marked the intent success, do nothing.
-    """
-    with transaction.atomic():
-        intent = PaymentIntent.objects.select_for_update().get(reference=reference, user=user)
-        if intent.status == "success":
-            return False  # already credited
-
-        # The ledger's unique (topup, reference) entry is the hard guarantee against crediting twice.
-        credited = wallet_services.credit_topup(user, amount, reference)
-        intent.mark_success(when=timezone.now())
-    return credited
-
-def _set_status_unless_success(intent, new_status: str) -> None:
-    """Change an intent's status without ever overwriting a credited (success) intent."""
-    PaymentIntent.objects.filter(pk=intent.pk).exclude(status="success").update(
-        status=new_status, updated=timezone.now()
-    )
+from .services import (
+    FINAL_STATUSES,
+    apply_verification,
+    credit_wallet_once,
+    log_paystack,
+    payment_matches,
+    set_status_unless_final,
+    trim_payload,
+)
 
 # ---- endpoints ---------------------------------------------------------------
 PaymentInitResponseSchema = inline_serializer(
@@ -112,8 +81,8 @@ class PaymentInitView(APIView):
         amount = Decimal(str(ser.validated_data["amount"]))
         metadata = ser.validated_data.get("metadata") or {}
 
-        # Generate stable reference per attempt (client can send one too if you prefer)
-        reference = f"QS-{request.user.id}-{timezone.now().strftime('%Y%m%d%H%M%S%f')[-10:]}"
+        # Random, so nobody can guess or pre-empt another user's reference
+        reference = f"QS-{uuid.uuid4().hex}"
         intent = PaymentIntent.objects.create(
             user=request.user,
             amount=amount,
@@ -127,16 +96,16 @@ class PaymentInitView(APIView):
                 amount_naira=amount,
                 reference=reference,
                 metadata=metadata,
-                callback_url=None,  # optionally set a frontend callback
+                callback_url=settings.PAYSTACK_CALLBACK_URL or None,  # None: Paystack dashboard default
             )
         except Exception:
             err_body = {"status": False, "message": "Provider initialize request failed"}
-            _log_provider(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, err_body, 502)
+            log_paystack(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, err_body, 502)
             intent.init_response = err_body
             intent.status = "failed"
             intent.save(update_fields=["init_response", "status", "updated"])
             return Response({"detail": "Payment provider unavailable. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
-        _log_provider(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, body, code)
+        log_paystack(request.user, reference, "/transaction/initialize", {"amount": str(amount)}, body, code)
 
         # Defensive parse
         data = (body or {}).get("data") or {}
@@ -161,7 +130,11 @@ class PaymentVerifyView(APIView):
 
     @extend_schema(
         responses={200: PaymentVerifyResponseSchema, 404: DetailSchema, 502: DetailSchema},
-        description="Verify a Paystack top-up reference and credit wallet idempotently.",
+        description=(
+            "Verify a Paystack top-up reference and credit the wallet once. Status is success, "
+            "review (paid a different amount/currency: not credited, support will follow up), "
+            "failed, abandoned or pending."
+        ),
     )
     def get(self, request, reference: str):
         try:
@@ -169,44 +142,30 @@ class PaymentVerifyView(APIView):
         except PaymentIntent.DoesNotExist:
             return Response({"detail": "Unknown reference"}, status=404)
 
-        # Success is final: the wallet is already credited, so don't re-verify or touch the status.
-        if intent.status == "success":
-            return Response({"reference": reference, "status": "success", "credited": False})
+        # Credited or under review: nothing Paystack says now can change it, so don't ask again.
+        if intent.status in FINAL_STATUSES:
+            return Response({"reference": reference, "status": intent.status, "credited": False})
 
         try:
             code, body = ps_verify(reference)
         except Exception:
             return Response({"detail": "Payment verification unavailable. Please retry."}, status=status.HTTP_502_BAD_GATEWAY)
-        _log_provider(request.user, reference, "/transaction/verify", None, body, code)
+        body = trim_payload(body)
+        log_paystack(request.user, reference, "/transaction/verify", None, body, code)
 
         intent.verify_response = body
         intent.save(update_fields=["verify_response", "updated"])
 
-        # Success condition based on Paystack verify payload
-        status_text = (body.get("data") or {}).get("status")
-        amount_kobo = (body.get("data") or {}).get("amount")
-        currency = (body.get("data") or {}).get("currency")
-
-        if code == 200 and body.get("status") and status_text == "success" and currency == "NGN":
-            # Idempotent credit
-            credited = _credit_wallet_once(request.user, intent.amount, intent.reference)
-            return Response({
-                "reference": reference,
-                "status": "success",
-                "credited": credited,
-            })
-
-        if status_text in {"failed", "abandoned"}:
-            _set_status_unless_success(intent, "failed")
-            return Response({"reference": reference, "status": "failed"})
-
-        # still pending
-        _set_status_unless_success(intent, "pending")
-        return Response({"reference": reference, "status": "pending"})
+        result, credited = apply_verification(intent, code, body)
+        response = {"reference": reference, "status": result}
+        if result == "success":
+            response["credited"] = credited
+        return Response(response)
 
 @method_decorator(csrf_exempt, name="dispatch")
 class PaystackWebhookView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = []  # Paystack sends every webhook from a few IPs; never rate-limit them away
 
     @extend_schema(
         request=WebhookRequestSchema,
@@ -226,35 +185,39 @@ class PaystackWebhookView(APIView):
             reference = data.get("reference")
         except Exception:
             return Response({"detail": "Malformed payload"}, status=400)
+        stored = trim_payload(payload)
 
         # Find intent
         try:
             intent = PaymentIntent.objects.select_related("user").get(reference=reference)
         except PaymentIntent.DoesNotExist:
             # Still log for forensic purposes
-            _log_provider(None, reference or "-", "webhook", {"event": event}, payload, 200)
+            log_paystack(None, reference or "-", "webhook", {"event": event}, stored, 200)
             return Response({"detail": "Reference not found"}, status=200)
 
         # Attach webhook (append behaviour)
         try:
             events = (intent.webhook_events or [])
-            events.append(payload)
+            events.append(stored)
             intent.webhook_events = events
             intent.save(update_fields=["webhook_events", "updated"])
         except Exception:
             pass
 
-        # Process success
+        # Process success: credit only if Paystack charged exactly what we asked for
         if event == "charge.success" and (data.get("status") == "success"):
-            _log_provider(intent.user, reference, "webhook:charge.success", None, payload, 200)
-            _credit_wallet_once(intent.user, intent.amount, intent.reference)
+            log_paystack(intent.user, reference, "webhook:charge.success", None, stored, 200)
+            if payment_matches(intent, data):
+                credit_wallet_once(intent.user, intent.amount, intent.reference)
+            else:
+                set_status_unless_final(intent, "review")
             return Response({"ok": True})
 
         if event == "charge.failed":
-            _set_status_unless_success(intent, "failed")
-            _log_provider(intent.user, reference, "webhook:charge.failed", None, payload, 200)
+            set_status_unless_final(intent, "failed")
+            log_paystack(intent.user, reference, "webhook:charge.failed", None, stored, 200)
             return Response({"ok": True})
 
         # Ignore other events
-        _log_provider(intent.user, reference, f"webhook:{event}", None, payload, 200)
+        log_paystack(intent.user, reference, f"webhook:{event}", None, stored, 200)
         return Response({"ok": True})
